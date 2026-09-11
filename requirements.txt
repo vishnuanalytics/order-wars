@@ -1,0 +1,8 @@
+# Phase 1-2: LangGraph agent basics + multi-agent coordination
+langgraph
+langchain-core
+langchain-anthropic
+python-dotenv
+
+# Phase 3+ deps (geopandas, fastapi, deepeval, ...) are added when we reach
+# those phases — see claude.md "Project phases".
