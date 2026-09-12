@@ -3,6 +3,4 @@ venv/
 __pycache__/
 *.pyc
 .pytest_cache/
-logs/*
-!logs/.gitkeep
 map_data/raw/

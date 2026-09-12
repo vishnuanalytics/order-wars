@@ -10,5 +10,11 @@ langchain-anthropic
 
 pytest
 
+# Persistence (Neon Postgres) — see CLAUDE.md "Persistence (Neon Postgres)".
+# Models/migrations exist now; the app doesn't connect until Phase 5.
+sqlalchemy
+psycopg[binary]
+alembic
+
 # Phase 3+ deps (geopandas, fastapi, deepeval, ...) are added when we reach
 # those phases — see claude.md "Project phases".
