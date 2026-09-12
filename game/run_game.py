@@ -5,18 +5,25 @@ than `agents.graph.run()`'s single blocking `.invoke()`), so every action can
 be persisted to Postgres as it happens and a win condition can be checked
 after each turn instead of only at the very end.
 
+Split into `create_game()` (fast — just DB writes) and `play_game()` (slow —
+the actual LLM-driven turn loop) so `backend/` can create a game
+synchronously inside a request handler, return its id immediately, and run
+`play_game()` in a background thread — a client shouldn't have to hold a
+request open for what could be minutes of LLM calls. `run_game()` is the
+simple combined version, for the CLI and tests that don't need that split.
+
 Kept deliberately simple for Phase 5's first pass: a single elimination win
-condition (one faction left holding any territory), and one hardcoded/
-CLI-configurable scenario — the scenario-editor UI that would let a user
-build `Scenario`/`ScenarioFaction` rows from a browser is separate, later
-Phase 5 work. This module already writes those tables (an ad-hoc scenario is
-still a real one), so that UI just needs to become another way to populate
-the same rows.
+condition (one faction left holding any territory). Loading factions from a
+saved `Scenario` (`load_faction_configs`) or building an ad-hoc one are both
+supported — either way, the game gets real `Scenario`/`ScenarioFaction` rows
+(an ad-hoc run still creates one), so `backend/`'s future scenario-editor
+endpoints are just another way to populate the same tables.
 """
 
 import argparse
+import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -53,8 +60,8 @@ def check_winner(state: GameState) -> str | None:
 @contextmanager
 def _scoped_session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
     """Same commit/rollback shape as `db.session.session_scope()`, but
-    parameterized so tests can inject a SQLite sessionmaker instead of
-    hitting the real Neon database (see tests/test_run_game.py).
+    parameterized so tests (and, soon, `backend/`) can inject a session
+    factory instead of always hitting the real Neon database.
     """
     session = session_factory()
     try:
@@ -67,30 +74,81 @@ def _scoped_session(session_factory: sessionmaker[Session]) -> Iterator[Session]
         session.close()
 
 
-def _create_game_records(
-    session: Session, faction_configs: list[dict], max_turns: int
-) -> tuple[uuid.UUID, dict[str, uuid.UUID]]:
-    """Write the Scenario/ScenarioFaction/Game/GameFaction rows for a new
-    run. Returns the new game's id and a faction_id (app) -> id (db) map,
-    since every other table FKs to the db-generated GameFaction.id, not the
-    app's string faction_id.
+def _slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "faction"
+
+
+def load_faction_configs(session: Session, scenario_id: uuid.UUID) -> list[dict]:
+    """Build `faction_configs` (the shape `initial_state_for` expects) from
+    an existing `Scenario`'s `ScenarioFaction` rows.
+
+    `faction_id` (the short string agents.graph uses internally, e.g. as
+    dict keys) is derived from the faction's name, since ScenarioFaction has
+    no such field of its own — only a DB UUID. Deduped with a numeric suffix
+    if two factions in the scenario would otherwise slugify to the same id.
+    `home_province` is `starting_territory[0]` — this project doesn't yet
+    support a multi-province starting position (see agents/actions.py: one
+    pooled army, no per-province garrisons).
     """
-    scenario = Scenario(name="Ad-hoc run", max_turns=max_turns)
-    for cfg in faction_configs:
-        scenario.factions.append(
-            ScenarioFaction(
-                faction_name=cfg["name"],
-                role_preset=RolePreset(cfg["role_preset"]),
-                starting_resources=dict(cfg.get("resources", {"gold": 20})),
-                starting_units=dict(cfg.get("units", {"legion": 2})),
-                starting_territory=[cfg["home_province"]],
-            )
+    scenario = session.get(Scenario, scenario_id)
+    if scenario is None:
+        raise ValueError(f"No scenario with id {scenario_id}")
+
+    faction_configs = []
+    seen_ids: set[str] = set()
+    for sf in scenario.factions:
+        if not sf.starting_territory:
+            raise ValueError(f"ScenarioFaction {sf.id} ({sf.faction_name}) has no starting_territory")
+        base_id = _slugify(sf.faction_name)
+        faction_id = base_id
+        suffix = 2
+        while faction_id in seen_ids:
+            faction_id = f"{base_id}_{suffix}"
+            suffix += 1
+        seen_ids.add(faction_id)
+
+        faction_configs.append(
+            {
+                "faction_id": faction_id,
+                "name": sf.faction_name,
+                "role_preset": sf.role_preset.value,
+                "home_province": sf.starting_territory[0],
+                "resources": dict(sf.starting_resources) or None,
+                "units": dict(sf.starting_units) or None,
+            }
         )
-    session.add(scenario)
-    session.flush()  # assigns scenario.id without committing yet
+    return faction_configs
+
+
+def _create_game_records(
+    session: Session,
+    faction_configs: list[dict],
+    max_turns: int,
+    scenario_id: uuid.UUID | None,
+) -> tuple[uuid.UUID, dict[str, uuid.UUID]]:
+    """Write the Game/GameFaction rows for a new run (and, if `scenario_id`
+    is None, a fresh ad-hoc Scenario/ScenarioFaction too). Returns the new
+    game's id and a faction_id (app) -> id (db) map, since every other table
+    FKs to the db-generated GameFaction.id, not the app's string faction_id.
+    """
+    if scenario_id is None:
+        scenario = Scenario(name="Ad-hoc run", max_turns=max_turns)
+        for cfg in faction_configs:
+            scenario.factions.append(
+                ScenarioFaction(
+                    faction_name=cfg["name"],
+                    role_preset=RolePreset(cfg["role_preset"]),
+                    starting_resources=dict(cfg.get("resources") or {"gold": 20}),
+                    starting_units=dict(cfg.get("units") or {"legion": 2}),
+                    starting_territory=[cfg["home_province"]],
+                )
+            )
+        session.add(scenario)
+        session.flush()  # assigns scenario.id without committing yet
+        scenario_id = scenario.id
 
     game = Game(
-        scenario_id=scenario.id,
+        scenario_id=scenario_id,
         status=GameStatus.RUNNING,
         config_snapshot={"factions": faction_configs, "max_turns": max_turns},
     )
@@ -111,20 +169,48 @@ def _create_game_records(
     return game.id, db_faction_id
 
 
-def run_game(
+def create_game(
     faction_configs: list[dict] | None = None,
+    scenario_id: uuid.UUID | None = None,
     max_turns: int = 10,
     session_factory: sessionmaker[Session] | None = None,
-) -> GameState:
-    """Run a game turn-by-turn, persisting as it goes. Returns the final
-    (or winning) `GameState`, same shape `agents.graph.run()` returns.
+) -> tuple[uuid.UUID, list[dict], dict[str, uuid.UUID]]:
+    """Fast, DB-only half of starting a game: write the records, return
+    everything `play_game()` needs. Exactly one of `faction_configs` /
+    `scenario_id` should be given; if neither is, falls back to the demo.
     """
-    faction_configs = faction_configs if faction_configs is not None else DEMO_FACTIONS
-    require_llm_configured()
     session_factory = session_factory or get_sessionmaker()
 
     with _scoped_session(session_factory) as session:
-        game_id, db_faction_id = _create_game_records(session, faction_configs, max_turns)
+        if scenario_id is not None:
+            faction_configs = load_faction_configs(session, scenario_id)
+        elif faction_configs is None:
+            faction_configs = DEMO_FACTIONS
+        game_id, db_faction_id = _create_game_records(
+            session, faction_configs, max_turns, scenario_id
+        )
+
+    return game_id, faction_configs, db_faction_id
+
+
+def play_game(
+    game_id: uuid.UUID,
+    faction_configs: list[dict],
+    db_faction_id: dict[str, uuid.UUID],
+    max_turns: int = 10,
+    session_factory: sessionmaker[Session] | None = None,
+    on_event: Callable[[GameState], None] | None = None,
+) -> GameState:
+    """Slow half: the actual LLM-driven turn loop, persisting as it goes.
+
+    `on_event`, if given, is called with every yielded `GameState` (the
+    initial one too, before any faction has acted) — `backend/` uses this to
+    broadcast live updates over WebSocket. Runs synchronously/blocking on
+    whatever thread calls it; `backend/` is responsible for putting that on
+    a background thread, not this function.
+    """
+    require_llm_configured()
+    session_factory = session_factory or get_sessionmaker()
 
     initial_state = initial_state_for(faction_configs, max_turns)
     graph = build_graph()
@@ -136,6 +222,9 @@ def run_game(
 
     for state in graph.stream(initial_state, config, stream_mode="values"):
         final_state = state
+        if on_event is not None:
+            on_event(state)
+
         event = state.get("last_event")
         if event is None:
             continue  # the initial state, before any faction has acted
@@ -197,6 +286,26 @@ def run_game(
             game.winner_faction_id = db_faction_id[winner_faction_id]
 
     return final_state
+
+
+def run_game(
+    faction_configs: list[dict] | None = None,
+    scenario_id: uuid.UUID | None = None,
+    max_turns: int = 10,
+    session_factory: sessionmaker[Session] | None = None,
+    on_event: Callable[[GameState], None] | None = None,
+) -> GameState:
+    """Create and play a game in one call. See `create_game`/`play_game` for
+    the split version `backend/` uses to avoid blocking a request on the
+    whole game.
+    """
+    session_factory = session_factory or get_sessionmaker()
+    game_id, faction_configs, db_faction_id = create_game(
+        faction_configs, scenario_id, max_turns, session_factory
+    )
+    return play_game(
+        game_id, faction_configs, db_faction_id, max_turns, session_factory, on_event
+    )
 
 
 def _parse_args():

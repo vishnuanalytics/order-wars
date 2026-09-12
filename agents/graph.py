@@ -215,7 +215,11 @@ def initial_state_for(faction_configs: list[dict], max_turns: int) -> GameState:
     """Build the starting `GameState` for a game. Each entry in
     `faction_configs` is a dict with `faction_id`, `name`, `role_preset`, and
     `home_province` (a real province id from `map_data/provinces.geojson` —
-    the faction's sole starting territory).
+    the faction's sole starting territory). Optional `resources`/`units`
+    override `STARTING_RESOURCES`/`STARTING_UNITS` per faction — this is
+    what makes a scenario's customized starting resources/units (see
+    `db.models.ScenarioFaction`) actually affect the simulation, not just
+    get recorded in the persisted config and then silently ignored.
 
     Shared by `run()` (below, single blocking `.invoke()`) and
     `game/run_game.py` (which needs the same state but drives the graph via
@@ -228,8 +232,8 @@ def initial_state_for(faction_configs: list[dict], max_turns: int) -> GameState:
             "role_preset": cfg["role_preset"],
             "intent": None,
             "last_action": None,
-            "resources": dict(STARTING_RESOURCES),
-            "units": dict(STARTING_UNITS),
+            "resources": dict(cfg.get("resources") or STARTING_RESOURCES),
+            "units": dict(cfg.get("units") or STARTING_UNITS),
         }
         for cfg in faction_configs
     }

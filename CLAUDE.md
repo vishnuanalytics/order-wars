@@ -389,7 +389,7 @@ came up.
         into the other without a land bridge. Worth knowing before treating
         "at war" as meaning "actively fighting."
 - [~] Phase 5 — game loop + visualization (in progress: game loop + Postgres
-      wiring done; FastAPI/WebSocket backend, Leaflet/D3 frontend, and the
+      wiring + FastAPI/WebSocket backend done; Leaflet/D3 frontend and the
       scenario-editor UI are not built yet)
   - [x] Real Neon persistence wired up (`db/session.py` now actually used
         by the app, not just designed): `DATABASE_URL` added, connection
@@ -431,8 +431,60 @@ came up.
         game_events, 12 faction_state_snapshots, and 1 diplomatic_relation
         (Carthage's declare_war on Gaul) — all under `order_wars`, `public`
         and other projects' tables untouched
-  - [ ] Not yet built: FastAPI/WebSocket backend (`backend/`), Leaflet/D3
-        frontend (`frontend/`), and the scenario-editor UI
+  - [x] `game/run_game.py` split into `create_game()` (fast — just the DB
+        writes) and `play_game()` (slow — the actual turn loop), so
+        `backend/` can return a game id immediately from a request handler
+        and run the LLM-driven loop in the background instead of blocking
+        the request for however long the game takes. `run_game()` stays as
+        the simple combined version for the CLI/tests. Also added
+        `load_faction_configs()` to build `faction_configs` from an
+        existing `Scenario`'s rows (slugifying faction names into the short
+        ids `agents.graph` uses internally, deduped on collision), so a
+        game can start `from scenario_id=...` and reuse a saved scenario
+        instead of always creating a fresh ad-hoc one
+  - [x] Bug fixed alongside this: per-faction `starting_resources`/
+        `starting_units` were already being persisted onto
+        `ScenarioFaction` but `agents.graph.initial_state_for` ignored them
+        and used the global defaults for every faction regardless —
+        `resources`/`units` overrides in `faction_configs` now actually
+        reach the simulation, not just the DB record
+  - [x] `backend/main.py` (`uvicorn backend.main:app --reload`): FastAPI
+        app — `POST/GET /scenarios`, `POST /games` (from `scenario_id` or
+        an ad-hoc `factions` list), `GET /games`, `GET /games/{id}`
+        (status + each faction's latest resources/territory/units, derived
+        from its newest `FactionStateSnapshot`), `GET /games/{id}/events`,
+        `GET /map/provinces` (serves the committed GeoJSON), and
+        `WS /games/{id}/live` for live updates while a game plays
+  - [x] `backend/game_hub.py`: in-process registry running `play_game` on a
+        background thread per game and fanning its updates out to
+        WebSocket subscribers via a plain `queue.Queue` per subscriber
+        (thread-safe; consumed on the async side via `asyncio.to_thread`,
+        since touching `asyncio.Queue` from a non-event-loop thread isn't
+        safe). Single-process only, by design — a multi-worker deployment
+        would need a real pub/sub broker (e.g. Redis) instead; noted here
+        rather than silently assumed
+  - [x] `tests/test_game_hub.py`: `GameHub` in isolation, using
+        `threading.Event` for deterministic ordering (not timing/sleeps)
+  - [x] `tests/test_backend.py`: `TestClient` against in-memory SQLite,
+        `GameHub.start` patched synchronous so most tests don't need to
+        wait on a background thread — except the one WebSocket test, which
+        deliberately restores real threading. That test surfaced a real
+        design property worth knowing, not a bug: `GameHub` has no
+        backlog/replay for a subscriber that joins after messages already
+        broadcast to zero subscribers — connecting late can genuinely miss
+        early turns (confirmed live too: a real websocket client, started
+        right after `POST /games` returned, connected too slowly to catch
+        anything but the final turn and `stream_end` on a fast 2-turn game.
+        The REST endpoints (`GET /games/{id}`, `.../events`) are unaffected
+        and remain the reliable way to get a game's full history)
+  - [x] Verified live end-to-end with a real running server (not just
+        `TestClient`): started `uvicorn`, created a real scenario, started
+        a real game from it (real LLMs, real Neon), watched it over a real
+        WebSocket connection, confirmed the final state and all 6 events
+        via REST, then deleted the test scenario/game from Neon afterward
+  - [ ] Not yet built: Leaflet/D3 frontend (`frontend/`) and the
+        scenario-editor UI (`backend/`'s scenario endpoints exist for it to
+        call, but nothing calls them yet outside tests/manual `curl`)
 - [ ] Phase 6 — eval + annotation
 
 ## Non-goals

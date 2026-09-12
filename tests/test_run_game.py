@@ -10,9 +10,19 @@ from sqlalchemy.pool import StaticPool
 
 from agents import graph as graph_module
 from agents.actions import FactionAction
-from db.models import Base, DiplomaticRelation, FactionStateSnapshot, Game, GameEvent, GameStatus
+from db.models import (
+    Base,
+    DiplomaticRelation,
+    FactionStateSnapshot,
+    Game,
+    GameEvent,
+    GameStatus,
+    RolePreset,
+    Scenario,
+    ScenarioFaction,
+)
 from game import run_game as run_game_module
-from game.run_game import check_winner, run_game
+from game.run_game import check_winner, create_game, load_faction_configs, play_game, run_game
 
 ROME_HOME = "831e80fffffffff"  # Italy 20
 ROME_NEIGHBOR = "831e81fffffffff"  # Italy 19, adjacent to ROME_HOME — this
@@ -151,3 +161,126 @@ def test_run_game_stops_at_max_turns_with_no_winner(sqlite_sessionmaker, monkeyp
         # each of the 2 completed rounds = 4 snapshots.
         assert session.query(GameEvent).count() == 4
         assert session.query(FactionStateSnapshot).count() == 4
+
+
+def test_create_game_returns_id_before_playing(sqlite_sessionmaker):
+    """The whole point of the create/play split: backend/ needs the game id
+    fast, without waiting for any turns to actually run.
+    """
+    game_id, faction_configs, db_faction_id = create_game(
+        FACTION_CONFIGS, max_turns=10, session_factory=sqlite_sessionmaker
+    )
+
+    assert faction_configs == FACTION_CONFIGS
+    assert set(db_faction_id) == {"a", "b"}
+    with sqlite_sessionmaker() as session:
+        game = session.get(Game, game_id)
+        assert game is not None
+        assert game.status == GameStatus.RUNNING  # play_game hasn't run yet
+
+
+def test_play_game_after_create_game_matches_run_game(sqlite_sessionmaker):
+    game_id, faction_configs, db_faction_id = create_game(
+        FACTION_CONFIGS, max_turns=10, session_factory=sqlite_sessionmaker
+    )
+    final_state = play_game(
+        game_id, faction_configs, db_faction_id, max_turns=10, session_factory=sqlite_sessionmaker
+    )
+
+    assert check_winner(final_state) == "a"
+    with sqlite_sessionmaker() as session:
+        assert session.get(Game, game_id).status == GameStatus.COMPLETED
+
+
+def test_play_game_calls_on_event_for_every_yielded_state(sqlite_sessionmaker):
+    game_id, faction_configs, db_faction_id = create_game(
+        FACTION_CONFIGS, max_turns=10, session_factory=sqlite_sessionmaker
+    )
+    seen = []
+    play_game(
+        game_id, faction_configs, db_faction_id, max_turns=10,
+        session_factory=sqlite_sessionmaker, on_event=seen.append,
+    )
+
+    # Initial state (last_event=None) plus one real turn before "a" wins.
+    assert len(seen) == 2
+    assert seen[0]["last_event"] is None
+    assert seen[1]["last_event"]["faction_id"] == "a"
+
+
+def test_load_faction_configs_from_scenario(sqlite_sessionmaker):
+    with sqlite_sessionmaker() as session:
+        scenario = Scenario(name="Test Scenario", max_turns=5)
+        scenario.factions.append(
+            ScenarioFaction(
+                faction_name="Rome",
+                role_preset=RolePreset.EXPANSIONIST,
+                starting_resources={"gold": 50},
+                starting_units={"legion": 4},
+                starting_territory=[ROME_HOME],
+            )
+        )
+        scenario.factions.append(
+            ScenarioFaction(
+                faction_name="Rome",  # duplicate name — exercises slug dedup
+                role_preset=RolePreset.WARMONGER,
+                starting_territory=[ROME_NEIGHBOR],
+            )
+        )
+        session.add(scenario)
+        session.commit()
+        scenario_id = scenario.id
+
+    with sqlite_sessionmaker() as session:
+        configs = load_faction_configs(session, scenario_id)
+
+    assert [c["faction_id"] for c in configs] == ["rome", "rome_2"]
+    assert configs[0]["home_province"] == ROME_HOME
+    assert configs[0]["resources"] == {"gold": 50}
+    assert configs[0]["units"] == {"legion": 4}
+    assert configs[1]["role_preset"] == "warmonger"
+
+
+def test_run_game_from_scenario_id(sqlite_sessionmaker, monkeypatch):
+    with sqlite_sessionmaker() as session:
+        scenario = Scenario(name="From Scenario", max_turns=10)
+        scenario.factions.append(
+            ScenarioFaction(
+                faction_name="Strong", role_preset=RolePreset.WARMONGER,
+                starting_territory=[ROME_HOME],
+            )
+        )
+        scenario.factions.append(
+            ScenarioFaction(
+                faction_name="Weak", role_preset=RolePreset.ISOLATIONIST,
+                starting_territory=[ROME_NEIGHBOR],
+            )
+        )
+        session.add(scenario)
+        session.commit()
+        scenario_id = scenario.id
+
+    def _lopsided_from_scenario(faction_configs, max_turns):
+        from game.rules import pair_key
+
+        state = graph_module.initial_state_for(faction_configs, max_turns)
+        strong_id = next(c["faction_id"] for c in faction_configs if c["name"] == "Strong")
+        weak_id = next(c["faction_id"] for c in faction_configs if c["name"] == "Weak")
+        state["factions"][strong_id]["units"] = {"legion": 10}
+        state["factions"][weak_id]["units"] = {"legion": 1}
+        state["diplomatic_status"] = {pair_key(strong_id, weak_id): "war"}
+        return state
+
+    monkeypatch.setattr(run_game_module, "initial_state_for", _lopsided_from_scenario)
+    final_state = run_game(
+        scenario_id=scenario_id, max_turns=10, session_factory=sqlite_sessionmaker
+    )
+
+    winner_id = check_winner(final_state)
+    assert final_state["factions"][winner_id]["name"] == "Strong"
+
+    with sqlite_sessionmaker() as session:
+        game = session.query(Game).filter(Game.scenario_id == scenario_id).one()
+        assert game.status == GameStatus.COMPLETED
+        # Reused the existing scenario — didn't create a second one.
+        assert session.query(Scenario).count() == 1

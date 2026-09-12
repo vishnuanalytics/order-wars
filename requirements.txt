@@ -11,13 +11,13 @@ langchain-anthropic
 pytest
 
 # Persistence (Neon Postgres) — see CLAUDE.md "Persistence (Neon Postgres)".
-# Models/migrations exist now; the app doesn't connect until Phase 5.
+# Wired into the app (game/run_game.py, backend/) as of Phase 5.
 sqlalchemy
 psycopg[binary]
 alembic
 
-# Phase 3+ deps (fastapi, deepeval, ...) are added when we reach those
-# phases — see claude.md "Project phases".
+# Phase 6 deps (deepeval, ...) are added when we reach that phase — see
+# claude.md "Project phases".
 
 # Phase 3: map/geo generation — see map_data/generate_map.py.
 # Only generate_map.py imports these; the game itself just reads the
@@ -26,3 +26,8 @@ geopandas
 shapely
 pyogrio
 h3
+
+# Phase 5: FastAPI + WebSocket backend — see backend/main.py.
+fastapi
+uvicorn[standard]
+httpx  # needed by fastapi.testclient.TestClient, not the app itself

@@ -24,14 +24,17 @@ resort. See `.env.example` for the keys and model overrides.
 ## Run it
 
 ```bash
-python -m agents.graph      # Phase 4 demo: N factions, no persistence
-python -m game.run_game     # Phase 5: full game loop, persists to Postgres (needs DATABASE_URL)
-pytest tests/                # mocked, no live API/DB calls
+python -m agents.graph              # Phase 4 demo: N factions, no persistence
+python -m game.run_game             # Phase 5: full game loop, persists to Postgres (needs DATABASE_URL)
+uvicorn backend.main:app --reload   # Phase 5: HTTP/WebSocket API (needs DATABASE_URL)
+pytest tests/                        # mocked, no live API/DB calls
 ```
 
-`game.run_game` needs `DATABASE_URL` in `.env` (see `.env.example`) — it
-writes every game to Postgres. `agents.graph`'s demo doesn't persist
-anything, useful for a quick check without a database configured.
+`game.run_game` and `backend/` need `DATABASE_URL` in `.env` (see
+`.env.example`) — they write every game to Postgres. `agents.graph`'s demo
+doesn't persist anything, useful for a quick check without a database
+configured. With the backend running, `GET /docs` has the interactive API
+reference (FastAPI's auto-generated Swagger UI).
 
 ## Phase status
 
@@ -41,7 +44,8 @@ anything, useful for a quick check without a database configured.
 - [x] Phase 3 — map/geo generation (`map_data/`)
 - [x] Phase 4 — connect agents to the map (`agents/`, `game/`)
 - [~] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
-      — game loop + Postgres persistence done; backend/frontend not started
+      — game loop + Postgres persistence + FastAPI/WebSocket backend done;
+      frontend and scenario-editor UI not started
 - [ ] Phase 6 — eval + annotation (`eval/`)
 
 See `claude.md` for what each phase covers and the "Progress log" for what's
