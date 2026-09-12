@@ -319,8 +319,47 @@ came up.
         not part of the test suite
   - [ ] Not yet done: nothing in `agents/`/`game/` reads `provinces.geojson`
         — wiring factions to real provinces is Phase 4
-- [ ] Phase 4 — agents on the map — also where territory/resources/units and
-      the per-pair diplomatic status matrix get defined
+- [x] Phase 4 — agents on the map
+  - [x] `map_data/loader.py`: runtime province lookups (`get_province`,
+        `neighbors_of`, `province_ids_in_country`) — pure `json`, no
+        geopandas/h3 needed at runtime, only for offline generation
+  - [x] `agents/state.py`: `province_owner` (province id -> faction id) and
+        `diplomatic_status` (pair-keyed, war/truce/alliance) added to
+        `GameState`; `resources`/`units` added to `FactionState`. Territory
+        is deliberately NOT duplicated onto `FactionState` — `province_owner`
+        is the single source of truth (`game.rules.territory_of` derives it)
+  - [x] `agents/actions.py`: `FactionAction` reworked from Phase 2's abstract
+        `action_type`/`target_faction` to map-grounded fields —
+        `target_province` for `move_army`, `proposal` for `negotiate` — plus
+        `build_unit` and `declare_war`
+  - [x] `game/rules.py` (new package): pure, LLM-free resolution of a
+        sanitized action — income, capture, one-shot combat (simple
+        unit-count comparison, ceiling-based attrition — floor rounding was
+        tried first and caught in testing: `int(1 * 0.5) == 0` made any
+        1-unit stack immortal), unit building, unilateral `declare_war`, and
+        reciprocal `negotiate` (a proposal only resolves once the other side
+        proposes the same thing back — no one-sided forced alliances)
+  - [x] `agents/graph.py`: the executor prompt now lists real legal
+        `move_army` targets (own territory + adjacency, from
+        `map_data/loader.py`) and real other-faction ids/diplomatic status
+        instead of free-floating names; `_sanitize_action` repairs/downgrades
+        an LLM response that names an illegal province or faction anyway
+        (verified live: this matters — LLMs occasionally ignore the listed
+        options)
+  - [x] `tests/test_rules.py`: full coverage of `game/rules.py` against real
+        province ids/adjacency from the committed map (income, capture,
+        both combat outcomes, build cost/insufficient-funds, unilateral war,
+        one-sided vs. reciprocal negotiation)
+  - [x] `tests/test_graph.py` rewritten: covers intent refresh, a legal
+        move being applied, and an illegal move being sanitized to `hold`
+  - [x] Verified live against the real Groq -> OpenRouter -> Claude chain: a
+        3-turn, 3-faction run showed real territorial expansion into
+        adjacent provinces and a real `declare_war` (Carthage on Gaul).
+        Emergent finding, not a bug: Carthage and Gaul share no land border
+        in this map (only land got tiled, no naval movement modeled), so
+        that war is currently symbolic — neither side can ever `move_army`
+        into the other without a land bridge. Worth knowing before treating
+        "at war" as meaning "actively fighting."
 - [ ] Phase 5 — game loop + visualization — includes a scenario-editor UI
       (add/configure factions, assign role presets, tweak and rerun); Neon
       Postgres is the sole store for run history, no flat-file logs (see

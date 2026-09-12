@@ -24,7 +24,7 @@ resort. See `.env.example` for the keys and model overrides.
 ## Run it
 
 ```bash
-python -m agents.graph   # Phase 2: N factions, 2 turns each, live LLM calls
+python -m agents.graph   # Phase 4: N factions on the real map, live LLM calls
 pytest tests/            # mocked, no live API calls
 ```
 
@@ -34,7 +34,7 @@ pytest tests/            # mocked, no live API calls
 - [x] Phase 1 — LangGraph agent basics (`agents/`) — superseded by Phase 2
 - [x] Phase 2 — multi-agent coordination (`agents/`)
 - [x] Phase 3 — map/geo generation (`map_data/`)
-- [ ] Phase 4 — connect agents to the map
+- [x] Phase 4 — connect agents to the map (`agents/`, `game/`)
 - [ ] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
 - [ ] Phase 6 — eval + annotation (`eval/`)
 

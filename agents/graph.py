@@ -1,21 +1,14 @@
-"""Phase 2: N-faction turn-taking with a two-layer planner/executor hierarchy.
+"""Phase 4: N-faction turn-taking, grounded in the real map.
 
-One reusable node (`faction_turn`) handles whichever faction is up next,
-looping via `turn_order`/`active_faction_idx` in `GameState` rather than a
-fixed pair of nodes — this is what lets the same graph run 2 factions or 20.
-
-Each faction's turn has two layers (see CLAUDE.md "Agent & simulation
-design"):
-  - Strategic leader: sets/refreshes a short `intent` every
-    `INTENT_REFRESH_INTERVAL` turns, not every turn.
-  - Executor: chooses this turn's `FactionAction` (schema-validated, not free
-    text) within that intent.
-
-Full role specialization (separate military/diplomat/economic agents) isn't
-built yet — there's no territory, resources, or diplomatic state for them to
-act on distinctly until Phase 4, so splitting now would be hollow. This two-
-layer intent/executor split is the real hierarchy Phase 2 delivers; Phase 4/5
-add the state that makes further specialization meaningful.
+Builds on Phase 2's structure (one reusable `faction_turn` node, a two-layer
+intent/executor hierarchy) but the executor now chooses from real,
+currently-legal options — its own territory and adjacent provinces (from
+`map_data/provinces.geojson`), the other factions actually in play, and any
+diplomatic proposals pending against it — rather than free-floating
+`target_faction` strings. The LLM's raw output is still sanitized before use
+(an LLM can still name a province that isn't legal this turn); resolution of
+a sanitized action is delegated to `game.rules.resolve_action`, which is
+pure/LLM-free and independently tested.
 """
 
 import os
@@ -28,12 +21,36 @@ from agents.actions import FactionAction
 from agents.llm import build_llm
 from agents.roles import describe
 from agents.state import FactionState, GameState
+from game.rules import diplomatic_status_between, resolve_action, territory_of
+from map_data.loader import name_of, neighbors_of
 
 INTENT_REFRESH_INTERVAL = 3
 
 
-def _other_faction_names(state: GameState, faction_id: str) -> list[str]:
-    return [f["name"] for fid, f in state["factions"].items() if fid != faction_id]
+def _other_faction_ids(state: GameState, faction_id: str) -> list[str]:
+    return [fid for fid in state["turn_order"] if fid != faction_id]
+
+
+def _legal_move_targets(state: GameState, faction_id: str) -> list[str]:
+    """Own territory (reinforce) plus every province adjacent to it."""
+    owned = territory_of(state, faction_id)
+    targets = set(owned)
+    for province_id in owned:
+        targets.update(neighbors_of(province_id))
+    return sorted(targets)
+
+
+def _diplomacy_summary(state: GameState, faction_id: str) -> str:
+    lines = []
+    for other_id in _other_faction_ids(state, faction_id):
+        status = diplomatic_status_between(state, faction_id, other_id)
+        other_name = state["factions"][other_id]["name"]
+        line = f"{other_name} ({other_id}): {status}"
+        incoming = state["pending_proposals"].get(f"{other_id}->{faction_id}")
+        if incoming:
+            line += f" — they have proposed a {incoming}"
+        lines.append(line)
+    return "; ".join(lines) if lines else "no other factions"
 
 
 def _refresh_intent(faction: FactionState, other_names: list[str]) -> str:
@@ -52,50 +69,98 @@ def _refresh_intent(faction: FactionState, other_names: list[str]) -> str:
     return response.content if isinstance(response.content, str) else str(response.content)
 
 
-def _decide_action(faction: FactionState, other_names: list[str]) -> FactionAction:
+def _decide_action(
+    state: GameState, faction_id: str, move_targets: list[str]
+) -> FactionAction:
+    faction = state["factions"][faction_id]
+    owned = territory_of(state, faction_id)
+    move_options = ", ".join(f"{pid} ({name_of(pid)})" for pid in move_targets) or "none"
+
     # Structured output goes out as a tool call, whose JSON args get cut off
     # mid-generation if hidden reasoning eats too much of a small budget
     # (confirmed live against Groq: a 200-token budget truncated the tool
     # call and failed to parse) — same cause as the note in _refresh_intent.
     llm = build_llm(max_tokens=600, schema=FactionAction)
     prompt = (
-        f"You lead the faction '{faction['name']}' in a strategy game. "
-        f"{describe(faction['role_preset'])}\n"
+        f"You lead the faction '{faction['name']}' ({faction_id}) in a "
+        f"strategy game. {describe(faction['role_preset'])}\n"
         f"Your current strategic intent: {faction['intent']}\n"
-        f"Other factions: {', '.join(other_names) or 'none'}.\n"
-        "Choose this turn's action."
+        f"Your territory ({len(owned)} provinces): "
+        f"{', '.join(name_of(p) for p in owned) or 'none'}\n"
+        f"Your resources: {faction['resources']}. Your units: {faction['units']}.\n"
+        f"Provinces you may move_army into this turn (own or adjacent): {move_options}\n"
+        f"Other factions and your relations with them: {_diplomacy_summary(state, faction_id)}\n"
+        "Choose this turn's action. For move_army, target_province must be "
+        "one of the listed province ids. For negotiate/declare_war, "
+        "target_faction must be one of the other factions' ids listed above."
     )
     return llm.invoke(prompt)
 
 
+def _sanitize_action(
+    state: GameState, faction_id: str, action: FactionAction, move_targets: list[str]
+) -> FactionAction:
+    """Repair or downgrade-to-hold an LLM action that isn't actually legal.
+
+    LLMs occasionally invent a province id or target a nonexistent faction
+    despite the prompt listing valid options — this is the sanitization
+    boundary `game.rules.resolve_action` relies on not having to re-check.
+    """
+    other_ids = set(_other_faction_ids(state, faction_id))
+
+    if action.action_type == "move_army" and action.target_province not in move_targets:
+        return FactionAction(
+            action_type="hold",
+            rationale=f"invalid move target {action.target_province!r} sanitized to hold",
+        )
+    if action.action_type in ("negotiate", "declare_war") and action.target_faction not in other_ids:
+        return FactionAction(
+            action_type="hold",
+            rationale=f"invalid target faction {action.target_faction!r} sanitized to hold",
+        )
+    if action.action_type == "negotiate" and action.proposal is None:
+        return FactionAction(
+            action_type="hold",
+            rationale="negotiate without a proposal type sanitized to hold",
+        )
+    return action
+
+
 def faction_turn(state: GameState) -> dict:
-    """Run one faction's turn: refresh intent if due, then decide an action."""
+    """Run one faction's turn: refresh intent if due, decide, then resolve."""
     idx = state["active_faction_idx"]
     faction_id = state["turn_order"][idx]
     faction: FactionState = dict(state["factions"][faction_id])
-    other_names = _other_faction_names(state, faction_id)
+    other_names = [state["factions"][fid]["name"] for fid in _other_faction_ids(state, faction_id)]
     round_number = state["turn"] + 1
 
     if faction["intent"] is None or (round_number - 1) % INTENT_REFRESH_INTERVAL == 0:
         faction["intent"] = _refresh_intent(faction, other_names)
+    state = {**state, "factions": {**state["factions"], faction_id: faction}}
 
-    action = _decide_action(faction, other_names)
+    move_targets = _legal_move_targets(state, faction_id)
+    action = _decide_action(state, faction_id, move_targets)
+    action = _sanitize_action(state, faction_id, action, move_targets)
+
+    resolved = resolve_action(state, faction_id, action)
+    factions = resolved["factions"]
+    faction = dict(factions[faction_id])
     faction["last_action"] = action.model_dump()
-
-    factions = dict(state["factions"])
     factions[faction_id] = faction
 
     next_idx = (idx + 1) % len(state["turn_order"])
     next_turn = state["turn"] + 1 if next_idx == 0 else state["turn"]
 
-    target = f" -> {action.target_faction}" if action.target_faction else ""
     log_line = (
-        f"Turn {round_number} — {faction['name']}: {action.action_type}{target} "
-        f"({action.rationale})"
+        f"Turn {round_number} — {faction['name']} ({action.action_type}): "
+        f"{resolved['resolution']} — {action.rationale}"
     )
 
     return {
         "factions": factions,
+        "province_owner": resolved["province_owner"],
+        "diplomatic_status": resolved["diplomatic_status"],
+        "pending_proposals": resolved["pending_proposals"],
         "active_faction_idx": next_idx,
         "turn": next_turn,
         "log": [log_line],
@@ -124,8 +189,10 @@ def build_graph():
 
 
 def run(faction_configs: list[dict], max_turns: int = 3) -> GameState:
-    """Run a game. `faction_configs` is a list of
-    `{"faction_id": ..., "name": ..., "role_preset": ...}` dicts, in turn order.
+    """Run a game. Each entry in `faction_configs` is a dict with
+    `faction_id`, `name`, `role_preset`, and `home_province` (a real province
+    id from `map_data/provinces.geojson` — the faction's sole starting
+    territory).
     """
     load_dotenv()
     if not any(
@@ -144,15 +211,22 @@ def run(faction_configs: list[dict], max_turns: int = 3) -> GameState:
             "role_preset": cfg["role_preset"],
             "intent": None,
             "last_action": None,
+            "resources": {"gold": 20},
+            "units": {"legion": 2},
         }
         for cfg in faction_configs
     }
+    province_owner = {cfg["home_province"]: cfg["faction_id"] for cfg in faction_configs}
+
     initial_state: GameState = {
         "turn": 0,
         "max_turns": max_turns,
         "turn_order": [cfg["faction_id"] for cfg in faction_configs],
         "active_faction_idx": 0,
         "factions": factions,
+        "province_owner": province_owner,
+        "diplomatic_status": {},
+        "pending_proposals": {},
         "log": [],
     }
 
@@ -164,10 +238,19 @@ def run(faction_configs: list[dict], max_turns: int = 3) -> GameState:
 
 if __name__ == "__main__":
     demo_factions = [
-        {"faction_id": "rome", "name": "Rome", "role_preset": "expansionist"},
-        {"faction_id": "carthage", "name": "Carthage", "role_preset": "warmonger"},
-        {"faction_id": "gaul", "name": "Gaul", "role_preset": "isolationist"},
+        {
+            "faction_id": "rome", "name": "Rome", "role_preset": "expansionist",
+            "home_province": "831e80fffffffff",  # Italy 20
+        },
+        {
+            "faction_id": "carthage", "name": "Carthage", "role_preset": "warmonger",
+            "home_province": "83386efffffffff",  # Tunisia 2
+        },
+        {
+            "faction_id": "gaul", "name": "Gaul", "role_preset": "isolationist",
+            "home_province": "833968fffffffff",  # France 31
+        },
     ]
-    result = run(demo_factions, max_turns=2)
+    result = run(demo_factions, max_turns=3)
     for line in result["log"]:
         print(line)

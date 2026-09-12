@@ -10,6 +10,10 @@ class FactionState(TypedDict):
     turn (a serialized `agents.actions.FactionAction`, or None before a
     faction has acted). See CLAUDE.md "Agent & simulation design" for why
     decisions are split into these two layers.
+
+    Territory is deliberately NOT a field here — `GameState.province_owner`
+    is the single source of truth for who owns what, so it can't desync from
+    a per-faction copy. Use `game.rules.territory_of(state, faction_id)`.
     """
 
     faction_id: str
@@ -17,6 +21,8 @@ class FactionState(TypedDict):
     role_preset: str
     intent: str | None
     last_action: dict | None
+    resources: dict[str, int]
+    units: dict[str, int]
 
 
 class GameState(TypedDict):
@@ -33,6 +39,14 @@ class GameState(TypedDict):
     round. `log` uses the `operator.add` reducer so that concurrent/
     successive nodes append to it instead of overwriting each other's
     entries.
+
+    `province_owner` maps a province id (from `map_data/provinces.geojson`)
+    to the owning faction id; an absent key means unclaimed. `diplomatic_status`
+    is keyed by `game.rules.pair_key(a, b)` (order-independent) with values
+    "war"/"truce"/"alliance"; an absent key means neutral (the default).
+    `pending_proposals` is keyed `"{proposer}->{target}"` (order matters —
+    it's a one-sided offer until the target reciprocates) with a
+    `agents.actions.ProposalType` value.
     """
 
     turn: int
@@ -40,4 +54,7 @@ class GameState(TypedDict):
     turn_order: list[str]
     active_faction_idx: int
     factions: dict[str, FactionState]
+    province_owner: dict[str, str]
+    diplomatic_status: dict[str, str]
+    pending_proposals: dict[str, str]
     log: Annotated[list[str], operator.add]
