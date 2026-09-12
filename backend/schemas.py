@@ -9,6 +9,8 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+from game.run_game import MAX_TURNS_LIMIT
+
 
 class ScenarioFactionIn(BaseModel):
     faction_name: str
@@ -23,7 +25,7 @@ class ScenarioFactionIn(BaseModel):
 
 class ScenarioCreate(BaseModel):
     name: str
-    max_turns: int = 10
+    max_turns: int = Field(default=10, ge=1, le=MAX_TURNS_LIMIT)
     map_ref: str | None = None
     factions: list[ScenarioFactionIn] = Field(min_length=1)
 
@@ -65,7 +67,7 @@ class GameCreate(BaseModel):
 
     scenario_id: uuid.UUID | None = None
     factions: list[AdHocFactionIn] | None = None
-    max_turns: int = 10
+    max_turns: int = Field(default=10, ge=1, le=MAX_TURNS_LIMIT)
 
 
 class GameCreatedOut(BaseModel):
@@ -77,6 +79,7 @@ class GameFactionOut(BaseModel):
     faction_name: str
     role_preset: str
     is_alive: bool
+    eliminated_at_turn: int | None
 
     model_config = {"from_attributes": True}
 

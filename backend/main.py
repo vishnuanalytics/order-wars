@@ -29,7 +29,7 @@ from backend.schemas import (
 )
 from db.models import FactionStateSnapshot, Game, GameEvent, RolePreset, Scenario, ScenarioFaction
 from db.session import get_sessionmaker
-from game.run_game import create_game, play_game
+from game.run_game import ScenarioNotFoundError, create_game, play_game
 from map_data.loader import PROVINCES_PATH
 
 app = FastAPI(title="Order Wars API")
@@ -134,8 +134,15 @@ def start_game(
             max_turns=payload.max_turns,
             session_factory=session_factory,
         )
-    except ValueError as exc:
+    except ScenarioNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        # Bad input (invalid role preset, duplicate/unreal home provinces)
+        # — distinct from ScenarioNotFoundError above, which is caught
+        # first since it's a ValueError subclass. Previously both fell
+        # into one `except ValueError` and always returned 404, even for
+        # input that had nothing to do with a missing scenario.
+        raise HTTPException(422, str(exc)) from exc
 
     def _on_event(state: dict) -> None:
         hub.broadcast(

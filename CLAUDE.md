@@ -482,6 +482,43 @@ came up.
         a real game from it (real LLMs, real Neon), watched it over a real
         WebSocket connection, confirmed the final state and all 6 events
         via REST, then deleted the test scenario/game from Neon afterward
+  - [x] Self-review pass over the whole phase turned up 5 real gaps, all
+        fixed and tested (not just the obvious "did it run once" check):
+      - No failure handling at all — a crashed `play_game` (e.g. no LLM key
+        configured) left `Game.status` stuck at `RUNNING` forever, logged
+        nothing server-side, and only reported to a WebSocket subscriber
+        connected at that exact instant. `GameStatus.FAILED` existed in the
+        schema but was never assigned anywhere. Fixed: `play_game` now
+        wraps the run in try/except, logs via `logging`, and marks the
+        `Game` `FAILED` with `ended_at` set before re-raising — verified
+        live against real Neon by blanking the LLM env vars for one run.
+      - `POST /games` with an invalid ad-hoc `role_preset` returned **404**
+        instead of **422** — `start_game()`'s `except ValueError` conflated
+        "scenario not found" with "bad input," since both raised the same
+        exception type. Fixed with a dedicated `ScenarioNotFoundError`
+        (a `ValueError` subclass) so the two are caught separately.
+      - `GameFaction.is_alive`/`eliminated_at_turn` were dead fields —
+        defined, exposed via `GameFactionOut`, never updated. `GET
+        /games/{id}` reported every faction alive forever, even ones
+        eliminated turns ago. Fixed: `_mark_eliminated_factions` checks
+        every faction's territory after each event and flips `is_alive`
+        the turn it first has none.
+      - No validation that factions' starting provinces are unique or
+        real — two factions sharing a `home_province` silently left one
+        with zero territory (permanently stuck: no owned province means no
+        legal `move_army` target, ever). Fixed: `create_game` now validates
+        both before writing anything.
+      - No upper bound on `max_turns` — the LLM fallback chain includes
+        paid Anthropic Claude, so an accidental `max_turns=100000` had no
+        cost ceiling. Fixed: `MAX_TURNS_LIMIT = 200` enforced in
+        `create_game` (all callers), the Pydantic schemas (`ge=1,
+        le=MAX_TURNS_LIMIT`), and the CLI's `--max-turns`.
+      - Deliberately not fixed yet (lower priority, noted for later): no
+        CORS middleware (will block the browser frontend once it exists),
+        an unlocked race in `db/session.py`'s lazy engine/sessionmaker
+        singletons (harmless until Phase 5's background threads made it a
+        live if low-probability concern), and `GameHub._subscribers`
+        growing one entry per game forever, never cleaned up.
   - [ ] Not yet built: Leaflet/D3 frontend (`frontend/`) and the
         scenario-editor UI (`backend/`'s scenario endpoints exist for it to
         call, but nothing calls them yet outside tests/manual `curl`)

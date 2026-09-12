@@ -69,7 +69,17 @@ def _no_real_llm_or_thread(monkeypatch):
     monkeypatch.setattr(run_game_module, "require_llm_configured", lambda: None)
     # Run the "background" game synchronously so the test can assert on its
     # result immediately after the POST /games response, no polling/sleeping.
-    monkeypatch.setattr(hub, "start", lambda game_id, target: target())
+    # Mirrors the real GameHub.start's exception handling (catch, don't
+    # propagate) — without this, a test simulating play_game raising would
+    # have that exception escape straight out of the route handler instead
+    # of being swallowed the way it actually is in production.
+    def _sync_start(game_id, target):
+        try:
+            target()
+        except Exception:
+            pass
+
+    monkeypatch.setattr(hub, "start", _sync_start)
 
 
 AD_HOC_FACTIONS = [
@@ -178,6 +188,104 @@ def test_start_game_rejects_both_scenario_and_factions(client):
 def test_start_game_404_for_unknown_scenario(client):
     response = client.post("/games", json={"scenario_id": "00000000-0000-0000-0000-000000000000"})
     assert response.status_code == 404
+
+
+def test_start_ad_hoc_game_with_invalid_role_preset_is_422_not_404(client):
+    """Previously both this and the "scenario not found" case above raised
+    plain ValueError and were caught by one `except ValueError: 404` —
+    conflating "bad input" with "not found". This has nothing to do with a
+    missing scenario, so it must not come back as 404.
+    """
+    bad_factions = [
+        {**AD_HOC_FACTIONS[0], "role_preset": "not_a_real_preset"},
+        AD_HOC_FACTIONS[1],
+    ]
+    response = client.post("/games", json={"factions": bad_factions, "max_turns": 1})
+    assert response.status_code == 422
+
+
+def test_start_game_rejects_duplicate_home_provinces(client):
+    dup_factions = [
+        {**AD_HOC_FACTIONS[0], "home_province": ROME_HOME},
+        {**AD_HOC_FACTIONS[1], "home_province": ROME_HOME},
+    ]
+    response = client.post("/games", json={"factions": dup_factions, "max_turns": 1})
+    assert response.status_code == 422
+
+
+def test_start_game_rejects_unreal_province_id(client):
+    bad_factions = [{**AD_HOC_FACTIONS[0], "home_province": "not_a_real_id"}, AD_HOC_FACTIONS[1]]
+    response = client.post("/games", json={"factions": bad_factions, "max_turns": 1})
+    assert response.status_code == 422
+
+
+def test_start_game_rejects_max_turns_out_of_range(client):
+    assert client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 0}).status_code == 422
+    assert client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 10_000}).status_code == 422
+
+
+def test_create_scenario_rejects_max_turns_out_of_range(client):
+    payload = {
+        "name": "Bad turns",
+        "max_turns": 10_000,
+        "factions": [{"faction_name": "Rome", "starting_territory": [ROME_HOME]}],
+    }
+    assert client.post("/scenarios", json=payload).status_code == 422
+
+
+def test_eliminated_faction_reflected_in_get_game(client, monkeypatch):
+    """End-to-end check of the is_alive/eliminated_at_turn fix through the
+    actual API, not just game/run_game.py directly. The autouse fixture's
+    LLM always holds (nothing ever gets eliminated), so this test needs its
+    own lopsided setup — same pattern as tests/test_run_game.py's.
+    """
+    from game.rules import pair_key
+
+    def _lopsided_state(faction_configs, max_turns):
+        state = graph_module.initial_state_for(faction_configs, max_turns)
+        state["factions"]["a"]["units"] = {"legion": 10}
+        state["factions"]["b"]["units"] = {"legion": 1}
+        state["diplomatic_status"] = {pair_key("a", "b"): "war"}
+        return state
+
+    class _AlwaysInvadeLLM:
+        def __init__(self, *a, **k):
+            pass
+
+        def invoke(self, prompt):
+            return FactionAction(action_type="move_army", target_province=ROME_NEIGHBOR, rationale="test")
+
+    monkeypatch.setattr(run_game_module, "initial_state_for", _lopsided_state)
+    monkeypatch.setattr(
+        graph_module, "build_llm",
+        lambda max_tokens=64, schema=None: (_AlwaysInvadeLLM() if schema is not None else _FakeIntentLLM()),
+    )
+
+    response = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 10})
+    game_id = response.json()["game_id"]
+
+    game = client.get(f"/games/{game_id}").json()
+    factions_by_name = {f["faction_name"]: f for f in game["factions"]}
+    assert factions_by_name["Rome"]["is_alive"] is True
+    assert factions_by_name["Rome"]["eliminated_at_turn"] is None
+    assert factions_by_name["Carthage"]["is_alive"] is False
+    assert factions_by_name["Carthage"]["eliminated_at_turn"] == 1
+
+
+def test_failed_game_is_marked_failed_not_stuck_running(client, monkeypatch):
+    """Simulates play_game raising (e.g. no LLM key configured) — the game
+    must end up FAILED, not stuck at RUNNING forever with no trace.
+    """
+    monkeypatch.setattr(
+        run_game_module, "require_llm_configured",
+        lambda: (_ for _ in ()).throw(RuntimeError("no LLM provider configured")),
+    )
+
+    response = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1})
+    game_id = response.json()["game_id"]
+
+    game = client.get(f"/games/{game_id}").json()
+    assert game["status"] == "failed"
 
 
 def test_list_games(client):

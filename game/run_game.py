@@ -21,6 +21,7 @@ endpoints are just another way to populate the same tables.
 """
 
 import argparse
+import logging
 import re
 import uuid
 from collections.abc import Callable, Iterator
@@ -45,6 +46,21 @@ from db.models import (
 )
 from db.session import get_sessionmaker
 from game.rules import territory_of
+from map_data.loader import get_province
+
+logger = logging.getLogger(__name__)
+
+MAX_TURNS_LIMIT = 200  # sanity cap — the LLM fallback chain includes paid
+# Anthropic Claude, so an unbounded max_turns (a typo, or a malicious
+# request) has no ceiling on real API cost otherwise.
+
+
+class ScenarioNotFoundError(ValueError):
+    """`scenario_id` doesn't refer to a real Scenario — distinct from other
+    `ValueError`s (invalid role preset, bad province id, ...) raised by the
+    same call, so callers like `backend/main.py` can tell "not found" (404)
+    apart from "bad input" (422) instead of guessing from the exception text.
+    """
 
 
 def check_winner(state: GameState) -> str | None:
@@ -55,6 +71,29 @@ def check_winner(state: GameState) -> str | None:
     """
     alive = [fid for fid in state["turn_order"] if territory_of(state, fid)]
     return alive[0] if len(alive) == 1 else None
+
+
+def _validate_faction_configs(faction_configs: list[dict]) -> None:
+    """Catch two ways a game silently breaks instead of erroring: a
+    `home_province` that isn't a real province id, or two factions starting
+    in the same one (whichever faction "loses" the collision starts with
+    zero territory — permanently stuck, since it has no owned province to
+    ever compute a legal `move_army` target from).
+    """
+    seen: dict[str, str] = {}
+    for cfg in faction_configs:
+        province_id = cfg["home_province"]
+        if get_province(province_id) is None:
+            raise ValueError(
+                f"Faction {cfg['faction_id']!r} has home_province {province_id!r}, "
+                "which isn't a real province id"
+            )
+        if province_id in seen:
+            raise ValueError(
+                f"Factions {seen[province_id]!r} and {cfg['faction_id']!r} both start "
+                f"in {province_id!r} — starting provinces must be unique"
+            )
+        seen[province_id] = cfg["faction_id"]
 
 
 @contextmanager
@@ -92,7 +131,7 @@ def load_faction_configs(session: Session, scenario_id: uuid.UUID) -> list[dict]
     """
     scenario = session.get(Scenario, scenario_id)
     if scenario is None:
-        raise ValueError(f"No scenario with id {scenario_id}")
+        raise ScenarioNotFoundError(f"No scenario with id {scenario_id}")
 
     faction_configs = []
     seen_ids: set[str] = set()
@@ -178,7 +217,16 @@ def create_game(
     """Fast, DB-only half of starting a game: write the records, return
     everything `play_game()` needs. Exactly one of `faction_configs` /
     `scenario_id` should be given; if neither is, falls back to the demo.
+
+    Raises `ValueError` for bad input (invalid role preset, duplicate/unreal
+    home provinces, `max_turns` out of range) and `ScenarioNotFoundError`
+    (a `ValueError` subclass) specifically when `scenario_id` doesn't exist
+    — callers needing to tell those apart (e.g. for HTTP status codes)
+    should catch `ScenarioNotFoundError` before the general `ValueError`.
     """
+    if not (1 <= max_turns <= MAX_TURNS_LIMIT):
+        raise ValueError(f"max_turns must be between 1 and {MAX_TURNS_LIMIT}, got {max_turns}")
+
     session_factory = session_factory or get_sessionmaker()
 
     with _scoped_session(session_factory) as session:
@@ -186,6 +234,7 @@ def create_game(
             faction_configs = load_faction_configs(session, scenario_id)
         elif faction_configs is None:
             faction_configs = DEMO_FACTIONS
+        _validate_faction_configs(faction_configs)
         game_id, db_faction_id = _create_game_records(
             session, faction_configs, max_turns, scenario_id
         )
@@ -208,9 +257,52 @@ def play_game(
     broadcast live updates over WebSocket. Runs synchronously/blocking on
     whatever thread calls it; `backend/` is responsible for putting that on
     a background thread, not this function.
+
+    On any exception (no LLM key configured, a DB error, ...), marks the
+    `Game` row `FAILED` (instead of leaving it stuck at `RUNNING` forever)
+    and logs it server-side before re-raising — a failure with nobody
+    connected via WebSocket at that instant would otherwise be completely
+    silent, with no trace anywhere.
     """
-    require_llm_configured()
     session_factory = session_factory or get_sessionmaker()
+    try:
+        return _play_game(
+            game_id, faction_configs, db_faction_id, max_turns, session_factory, on_event
+        )
+    except Exception:
+        logger.exception("Game %s failed", game_id)
+        try:
+            with _scoped_session(session_factory) as session:
+                game = session.get(Game, game_id)
+                if game is not None:
+                    game.status = GameStatus.FAILED
+                    game.ended_at = datetime.now(timezone.utc)
+        except Exception:
+            logger.exception("Game %s: also failed to record FAILED status", game_id)
+        raise
+
+
+def _mark_eliminated_factions(
+    session: Session, state: GameState, db_faction_id: dict[str, uuid.UUID], turn: int
+) -> None:
+    for faction_id in state["turn_order"]:
+        if territory_of(state, faction_id):
+            continue
+        game_faction = session.get(GameFaction, db_faction_id[faction_id])
+        if game_faction.is_alive:
+            game_faction.is_alive = False
+            game_faction.eliminated_at_turn = turn
+
+
+def _play_game(
+    game_id: uuid.UUID,
+    faction_configs: list[dict],
+    db_faction_id: dict[str, uuid.UUID],
+    max_turns: int,
+    session_factory: sessionmaker[Session],
+    on_event: Callable[[GameState], None] | None,
+) -> GameState:
+    require_llm_configured()
 
     initial_state = initial_state_for(faction_configs, max_turns)
     graph = build_graph()
@@ -257,6 +349,12 @@ def play_game(
                         )
                     )
             prev_diplomatic_status = dict(state["diplomatic_status"])
+
+            # Checked after every action, not just move_army: only combat
+            # can currently empty a faction's territory, but checking
+            # unconditionally costs a handful of dict lookups and doesn't
+            # assume that stays true as more action types are added.
+            _mark_eliminated_factions(session, state, db_faction_id, event["turn"])
 
             if state["active_faction_idx"] == 0:  # a full round just completed
                 for faction_id, faction in state["factions"].items():
@@ -308,10 +406,18 @@ def run_game(
     )
 
 
+def _bounded_max_turns(value: str) -> int:
+    n = int(value)
+    if not (1 <= n <= MAX_TURNS_LIMIT):
+        raise argparse.ArgumentTypeError(f"must be between 1 and {MAX_TURNS_LIMIT}")
+    return n
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--max-turns", type=int, default=10, help="Rounds to play if no winner emerges sooner."
+        "--max-turns", type=_bounded_max_turns, default=10,
+        help=f"Rounds to play if no winner emerges sooner (1-{MAX_TURNS_LIMIT}).",
     )
     return parser.parse_args()
 

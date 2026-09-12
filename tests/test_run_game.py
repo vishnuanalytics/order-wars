@@ -3,6 +3,8 @@
 per connection) — no live LLM or Neon calls in the suite.
 """
 
+import uuid
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -16,13 +18,22 @@ from db.models import (
     FactionStateSnapshot,
     Game,
     GameEvent,
+    GameFaction,
     GameStatus,
     RolePreset,
     Scenario,
     ScenarioFaction,
 )
 from game import run_game as run_game_module
-from game.run_game import check_winner, create_game, load_faction_configs, play_game, run_game
+from game.run_game import (
+    MAX_TURNS_LIMIT,
+    ScenarioNotFoundError,
+    check_winner,
+    create_game,
+    load_faction_configs,
+    play_game,
+    run_game,
+)
 
 ROME_HOME = "831e80fffffffff"  # Italy 20
 ROME_NEIGHBOR = "831e81fffffffff"  # Italy 19, adjacent to ROME_HOME — this
@@ -284,3 +295,76 @@ def test_run_game_from_scenario_id(sqlite_sessionmaker, monkeypatch):
         assert game.status == GameStatus.COMPLETED
         # Reused the existing scenario — didn't create a second one.
         assert session.query(Scenario).count() == 1
+
+
+def test_create_game_rejects_duplicate_home_provinces(sqlite_sessionmaker):
+    configs = [
+        {"faction_id": "a", "name": "A", "role_preset": "custom", "home_province": ROME_HOME},
+        {"faction_id": "b", "name": "B", "role_preset": "custom", "home_province": ROME_HOME},
+    ]
+    with pytest.raises(ValueError, match="both start in"):
+        create_game(configs, max_turns=5, session_factory=sqlite_sessionmaker)
+
+    with sqlite_sessionmaker() as session:
+        # Rejected before anything was written — no orphaned Scenario/Game.
+        assert session.query(Scenario).count() == 0
+        assert session.query(Game).count() == 0
+
+
+def test_create_game_rejects_unreal_province_id(sqlite_sessionmaker):
+    configs = [
+        {"faction_id": "a", "name": "A", "role_preset": "custom", "home_province": "not_a_real_id"},
+    ]
+    with pytest.raises(ValueError, match="isn't a real province id"):
+        create_game(configs, max_turns=5, session_factory=sqlite_sessionmaker)
+
+
+def test_create_game_rejects_max_turns_out_of_range(sqlite_sessionmaker):
+    with pytest.raises(ValueError, match="max_turns"):
+        create_game(FACTION_CONFIGS, max_turns=0, session_factory=sqlite_sessionmaker)
+    with pytest.raises(ValueError, match="max_turns"):
+        create_game(FACTION_CONFIGS, max_turns=MAX_TURNS_LIMIT + 1, session_factory=sqlite_sessionmaker)
+
+
+def test_load_faction_configs_raises_scenario_not_found_specifically(sqlite_sessionmaker):
+    """A ValueError subclass, not a plain ValueError — callers (backend/)
+    need to tell "doesn't exist" (404) apart from "bad input" (422).
+    """
+    with sqlite_sessionmaker() as session:
+        with pytest.raises(ScenarioNotFoundError):
+            load_faction_configs(session, uuid.uuid4())
+
+
+def test_play_game_marks_game_failed_and_logs_on_exception(sqlite_sessionmaker, monkeypatch, caplog):
+    game_id, faction_configs, db_faction_id = create_game(
+        FACTION_CONFIGS, max_turns=10, session_factory=sqlite_sessionmaker
+    )
+
+    def _boom():
+        raise RuntimeError("no LLM provider configured")
+
+    monkeypatch.setattr(run_game_module, "require_llm_configured", _boom)
+
+    with pytest.raises(RuntimeError, match="no LLM provider configured"):
+        play_game(game_id, faction_configs, db_faction_id, max_turns=10, session_factory=sqlite_sessionmaker)
+
+    with sqlite_sessionmaker() as session:
+        game = session.get(Game, game_id)
+        assert game.status == GameStatus.FAILED
+        assert game.ended_at is not None
+    assert "failed" in caplog.text.lower()
+
+
+def test_play_game_marks_faction_eliminated_when_territory_reaches_zero(sqlite_sessionmaker):
+    game_id, faction_configs, db_faction_id = create_game(
+        FACTION_CONFIGS, max_turns=10, session_factory=sqlite_sessionmaker
+    )
+    play_game(game_id, faction_configs, db_faction_id, max_turns=10, session_factory=sqlite_sessionmaker)
+
+    with sqlite_sessionmaker() as session:
+        winner = session.get(GameFaction, db_faction_id["a"])
+        loser = session.get(GameFaction, db_faction_id["b"])
+        assert winner.is_alive is True
+        assert winner.eliminated_at_turn is None
+        assert loser.is_alive is False
+        assert loser.eliminated_at_turn == 1
