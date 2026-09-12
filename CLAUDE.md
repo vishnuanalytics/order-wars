@@ -513,12 +513,27 @@ came up.
         cost ceiling. Fixed: `MAX_TURNS_LIMIT = 200` enforced in
         `create_game` (all callers), the Pydantic schemas (`ge=1,
         le=MAX_TURNS_LIMIT`), and the CLI's `--max-turns`.
-      - Deliberately not fixed yet (lower priority, noted for later): no
-        CORS middleware (will block the browser frontend once it exists),
-        an unlocked race in `db/session.py`'s lazy engine/sessionmaker
-        singletons (harmless until Phase 5's background threads made it a
-        live if low-probability concern), and `GameHub._subscribers`
-        growing one entry per game forever, never cleaned up.
+  - [x] The three medium-priority items from that review fixed too:
+      - No CORS middleware — added `CORSMiddleware`, origin list
+        configurable via `CORS_ORIGINS` (defaults to `*`; no
+        auth/cookie-based session exists to protect, see Non-goals).
+        Verified live: `Access-Control-Allow-Origin` header present against
+        a real running server, not just `TestClient`.
+      - Unlocked race in `db/session.py`'s lazy `get_engine`/
+        `get_sessionmaker` singletons — added a lock, double-checked
+        inside each function. **First attempt used a plain
+        `threading.Lock()` and deadlocked immediately**: `get_sessionmaker`
+        calls `get_engine()` while already holding the lock, and a plain
+        `Lock` isn't reentrant. Caught by the new test itself hanging, not
+        by inspection — fixed with `threading.RLock()`.
+      - `GameHub._subscribers` never shrank — `start()` now drops the
+        `game_id` entry once its background thread finishes (success or
+        error), so a long-running server doesn't accumulate one empty list
+        per game ever played. A client that subscribes to that exact,
+        already-finished `game_id` afterward still just waits forever for
+        a message that will never come — same as before this fix, not a
+        regression, since a late subscriber got nothing either way; this
+        only stops the bookkeeping itself from leaking.
   - [ ] Not yet built: Leaflet/D3 frontend (`frontend/`) and the
         scenario-editor UI (`backend/`'s scenario endpoints exist for it to
         call, but nothing calls them yet outside tests/manual `curl`)

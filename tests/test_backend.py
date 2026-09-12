@@ -92,6 +92,27 @@ def test_health(client):
     assert client.get("/health").json() == {"status": "ok"}
 
 
+def test_cors_allows_cross_origin_requests(client):
+    """The future browser frontend calls this API from a different origin
+    (e.g. a Vite dev server) — without CORSMiddleware this would 200 for
+    curl/TestClient (which don't enforce CORS) but be silently blocked by
+    an actual browser. Check the header a browser would actually gate on.
+    """
+    response = client.get("/health", headers={"Origin": "http://localhost:5173"})
+    assert response.headers["access-control-allow-origin"] == "*"
+
+    preflight = client.options(
+        "/games",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "*"
+
+
 def test_get_provinces_returns_real_geojson(client):
     response = client.get("/map/provinces")
     assert response.status_code == 200

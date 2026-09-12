@@ -4,6 +4,7 @@ threading.Event — no FastAPI/websocket layer, no timing-based flakiness.
 
 import queue
 import threading
+import time
 
 from backend.game_hub import GameHub
 
@@ -79,3 +80,46 @@ def test_start_does_not_block_the_caller():
 
     hub.start("game-1", _target)  # must return immediately, not wait for _target
     release.set()
+
+
+def test_start_forgets_the_game_after_finishing_successfully():
+    hub = GameHub()
+    finished = threading.Event()
+
+    hub.start("game-1", finished.set)
+
+    assert finished.wait(timeout=1)
+    # Give the thread's finally-block a moment to run past broadcast().
+    for _ in range(50):
+        if "game-1" not in hub._subscribers:
+            break
+        time.sleep(0.01)
+    assert "game-1" not in hub._subscribers
+
+
+def test_start_forgets_the_game_after_raising():
+    hub = GameHub()
+
+    def _target():
+        raise ValueError("boom")
+
+    hub.start("game-1", _target)
+
+    for _ in range(50):
+        if "game-1" not in hub._subscribers:
+            break
+        time.sleep(0.01)
+    assert "game-1" not in hub._subscribers
+
+
+def test_a_current_subscriber_still_gets_stream_end_despite_cleanup():
+    """Cleanup removes the dict entry, but a subscriber holding a direct
+    queue reference from before cleanup must still receive everything
+    broadcast before it ran.
+    """
+    hub = GameHub()
+    q = hub.subscribe("game-1")
+
+    hub.start("game-1", lambda: None)
+
+    assert q.get(timeout=1) == {"type": "stream_end"}

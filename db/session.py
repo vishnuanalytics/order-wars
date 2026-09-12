@@ -9,6 +9,7 @@ is only attempted when `get_engine()`/`session_scope()` is actually called.
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -28,6 +29,14 @@ DB_SCHEMA = "order_wars"
 
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
+# Guards both lazy singletons below. Only matters now that Phase 5 added
+# background threads (backend/game_hub.py) — two threads racing to
+# initialize simultaneously could otherwise both pass the `is None` check
+# and each build a separate Engine, one silently discarded.
+# Must be reentrant: get_sessionmaker() calls get_engine() while already
+# holding this lock — a plain Lock() deadlocks there on the very first call
+# (verified: it did, immediately, in this project's own test suite).
+_init_lock = threading.RLock()
 
 
 def _normalized_url(raw_url: str) -> str:
@@ -48,25 +57,29 @@ def get_engine() -> Engine:
     """
     global _engine
     if _engine is None:
-        load_dotenv()
-        database_url = os.environ.get("DATABASE_URL")
-        if not database_url:
-            raise RuntimeError(
-                "DATABASE_URL is not set. Copy the Postgres connection string "
-                "from the Neon console into .env as DATABASE_URL (this is "
-                "separate from NEON_API_KEY, which only manages Neon projects)."
-            )
-        _engine = create_engine(
-            _normalized_url(database_url),
-            execution_options={"schema_translate_map": {None: DB_SCHEMA}},
-        )
+        with _init_lock:
+            if _engine is None:  # re-check: another thread may have won the race
+                load_dotenv()
+                database_url = os.environ.get("DATABASE_URL")
+                if not database_url:
+                    raise RuntimeError(
+                        "DATABASE_URL is not set. Copy the Postgres connection string "
+                        "from the Neon console into .env as DATABASE_URL (this is "
+                        "separate from NEON_API_KEY, which only manages Neon projects)."
+                    )
+                _engine = create_engine(
+                    _normalized_url(database_url),
+                    execution_options={"schema_translate_map": {None: DB_SCHEMA}},
+                )
     return _engine
 
 
 def get_sessionmaker() -> sessionmaker[Session]:
     global _SessionLocal
     if _SessionLocal is None:
-        _SessionLocal = sessionmaker(bind=get_engine(), expire_on_commit=False)
+        with _init_lock:
+            if _SessionLocal is None:
+                _SessionLocal = sessionmaker(bind=get_engine(), expire_on_commit=False)
     return _SessionLocal
 
 

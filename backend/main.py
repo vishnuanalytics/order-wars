@@ -9,9 +9,12 @@ background thread via `backend.game_hub.hub` so the request doesn't block;
 """
 
 import asyncio
+import os
 import uuid
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -33,6 +36,24 @@ from game.run_game import ScenarioNotFoundError, create_game, play_game
 from map_data.loader import PROVINCES_PATH
 
 app = FastAPI(title="Order Wars API")
+
+load_dotenv()
+# The frontend (Phase 5, not built yet) will call this API from a browser on
+# a different origin (e.g. a Vite dev server), which needs CORS headers to
+# work at all — without this middleware every request from a page would be
+# silently blocked by the browser. Defaults to "*" (allow any origin): there
+# is no auth/cookie-based session here to protect (see CLAUDE.md
+# Non-goals — auth is explicitly out of scope for this portfolio project),
+# and allow_credentials is left False, so a wildcard origin doesn't expose
+# anything a same-origin request wouldn't. Set CORS_ORIGINS (comma-separated)
+# in .env to restrict this once a specific frontend origin is known.
+_cors_origins = os.environ.get("CORS_ORIGINS", "*")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if _cors_origins == "*" else [o.strip() for o in _cors_origins.split(",")],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _default_session_factory() -> sessionmaker[Session]:

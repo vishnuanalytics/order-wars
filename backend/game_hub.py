@@ -39,8 +39,24 @@ class GameHub:
                 self.broadcast(game_id, {"type": "error", "message": str(exc)})
             finally:
                 self.broadcast(game_id, {"type": "stream_end"})
+                # Nothing more will ever be broadcast for this game_id — drop
+                # its entry so a long-running server's _subscribers dict
+                # doesn't grow by one key (game finished, subscriber list
+                # already empty) for every game ever played, forever. A
+                # client that subscribes to this exact game_id afterward
+                # just gets a fresh empty entry and waits forever for a
+                # message that will never come — the same outcome a late
+                # subscriber already got before this cleanup existed, so
+                # this doesn't change that behavior, only stops it from
+                # leaking memory for the (expected) common case of nobody
+                # subscribing this late.
+                self._forget(game_id)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _forget(self, game_id: str) -> None:
+        with self._lock:
+            self._subscribers.pop(game_id, None)
 
     def subscribe(self, game_id: str) -> queue.Queue:
         q: queue.Queue = queue.Queue()
