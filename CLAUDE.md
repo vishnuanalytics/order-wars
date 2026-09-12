@@ -4,32 +4,39 @@ Guidance for Claude Code when working in this repository.
 
 ## What this project is
 
-A multi-agent strategy/war-game simulation used as a **learning project**. The end goal
-is a "Total War meets Civilization" simulation: factions (agents) expand territory,
-manage trade, and fight over a real-world-derived map, evaluated with DeepEval and
-improved via human annotation.
+A multi-agent strategy/war-game simulation. The end goal is a "Total War meets
+Civilization" simulation: factions (agents) expand territory, manage trade, and
+fight over a real-world-derived map, evaluated with DeepEval and improved via
+human annotation.
 
-**This is a learning project, not a race to a finished product.** The person building
-this is learning LangGraph, multi-agent systems, geospatial data, and eval pipelines
-from the ground up. Prioritize teaching and small, understandable steps over speed or
-cleverness.
+**This is a production-oriented build.** Prioritize working, well-structured,
+maintainable code over lesson pacing. Move efficiently through phases, use
+sound engineering judgment, and don't hold back on completeness or cleverness
+where it genuinely helps the system — but keep code readable and documented so
+it stays maintainable as it grows.
 
 ## How to work in this repo
 
-- Build in phases, in order. Do not jump ahead to a later phase's folder even if it
-  would be convenient — see "Project phases" below.
-- Prefer small, runnable pieces over large generated files. After adding code, explain
-  what it does before moving on.
-- Default pace is beginner/lesson-by-lesson: introduce one new concept at a time,
-  check it works, then continue. Don't dump a fully-built phase in one shot unless
-  explicitly asked to.
-- Keep code simple and readable over "production-grade" — this is for learning first.
-- **Coding style / division of labor**: Claude writes the code and explains it step
-  by step; the person runs it, reads it, and asks questions. This is not a "you type
-  it yourself" pairing style — the learning happens through reading working code and
-  running it, not through typing it from scratch.
-- The LLM backing the agents is **Anthropic Claude**, via `langchain-anthropic`,
-  reading `ANTHROPIC_API_KEY` from `.env` (see `.env.example` for the template).
+- Build in phases, in order (see "Project phases" below), but phases can move
+  as fast as makes sense — don't artificially slow down or gate on lesson-by-
+  lesson pacing.
+- Prefer complete, working implementations of a phase over minimal fragments,
+  as long as they stay reviewable (don't dump the entire repo in one shot;
+  land a phase in a small number of coherent, well-explained commits/edits).
+- After adding code, give a concise summary of what it does and why — enough
+  for review, not a tutorial.
+- Aim for solid engineering practices appropriate to a real system: clear
+  module boundaries, error handling, config via `.env`, and tests where they
+  add real confidence — while staying appropriately scoped for a project at
+  this stage (see "Non-goals").
+- **Coding style / division of labor**: Claude writes and iterates on the code;
+  the person reviews, runs it, and directs priorities.
+- The agents call LLMs through a fallback chain (`agents/llm.py`): **Groq**
+  and **OpenRouter** (free tiers) are tried first, **Anthropic Claude** (via
+  `langchain-anthropic`) is the paid last resort. Keys (`GROQ_API_KEY`,
+  `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`) live in `.env` — see
+  `.env.example` for the template. At least one key must be set; unset
+  providers are skipped, not treated as errors.
 
 ## Project phases (build in this order)
 
@@ -83,20 +90,26 @@ order-wars/
 - Run tests: `pytest tests/`
 - Run eval on a completed game: `python -m eval.run_eval --game-id <id>`
 
-## Learning log
+## Progress log
 
-Running record of concepts already covered, so a future session knows where
-we left off without re-deriving it from code. Update this when a lesson is
-completed — check the box and add a one-line note if something non-obvious
+Running record of what's been built, so a future session knows where things
+stand without re-deriving it from code. Update this when a phase or major
+piece lands — check the box and add a one-line note if something non-obvious
 came up.
 
-- [ ] Phase 0 — scaffolding (git, venv, `.env`, `requirements.txt`)
-- [ ] Phase 1 — LangGraph basics
-  - [ ] Lesson 1: single-node `StateGraph`, `GameState`, `.compile()`/`.invoke()`
-  - [ ] Lesson 2: two nodes + unconditional edge
-  - [ ] Lesson 3: conditional edges / routing
-  - [ ] Lesson 4: first real agent (calls Claude via `langchain-anthropic`)
-  - [ ] Lesson 5: `agents/graph.py` assembled, runnable as `python -m agents.graph`
+- [x] Phase 0 — scaffolding (git, venv, `.env`, `requirements.txt`)
+- [x] Phase 1 — LangGraph basics
+  - [x] `agents/state.py`: `GameState` schema (`turn`, `max_turns`, `log`
+        with an `operator.add` reducer, `last_decision`)
+  - [x] Single-node `StateGraph`, `.compile()`/`.invoke()`
+  - [x] Conditional edges / routing — `route_after_decision` loops
+        `start_turn` -> `agent_decide` until `max_turns`, then `END`
+  - [x] First real agent (calls an LLM via `agents/llm.py`'s fallback
+        chain — Groq -> OpenRouter -> Claude; see the LLM provider note
+        above. Not hardcoded to Claude, unlike the original plan.)
+  - [x] `agents/graph.py` assembled, runnable as `python -m agents.graph`
+  - [x] `tests/test_graph.py` covers the pure nodes, the routing function,
+        and a full mocked run (no live API calls in the test suite)
 - [ ] Phase 2 — multi-agent coordination
 - [ ] Phase 3 — map/geo generation
 - [ ] Phase 4 — agents on the map
@@ -107,5 +120,6 @@ came up.
 
 - No live Google Maps API calls in the core game loop (cost/quota, and historical
   factions don't belong on modern road networks).
-- No premature production concerns (auth, deployment, scaling) — this is a learning
-  and portfolio project.
+- No premature production concerns unrelated to the game itself (auth, deployment,
+  scaling, multi-tenant infra) — this is still a portfolio-scale project, just
+  built with production-quality code rather than lesson-paced fragments.

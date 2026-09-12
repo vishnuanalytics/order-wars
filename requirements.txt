@@ -1,8 +1,14 @@
 # Phase 1-2: LangGraph agent basics + multi-agent coordination
 langgraph
 langchain-core
-langchain-anthropic
 python-dotenv
+
+# LLM providers, tried in this order — see agents/llm.py
+langchain-groq
+langchain-openai
+langchain-anthropic
+
+pytest
 
 # Phase 3+ deps (geopandas, fastapi, deepeval, ...) are added when we reach
 # those phases — see claude.md "Project phases".
