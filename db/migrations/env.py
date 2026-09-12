@@ -7,8 +7,10 @@ from sqlalchemy import pool
 
 from alembic import context
 
+from sqlalchemy import text
+
 from db.models import Base
-from db.session import _normalized_url
+from db.session import DB_SCHEMA, _normalized_url
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -33,6 +35,26 @@ if not database_url:
 config.set_main_option("sqlalchemy.url", _normalized_url(database_url))
 
 target_metadata = Base.metadata
+
+
+def _include_name(name, type_, parent_names):
+    """Extra safety net on top of NOT passing `include_schemas=True` below
+    (see that comment for why) — keeps Alembic from ever comparing against
+    other schemas' tables in this shared Neon database if some future
+    Alembic/SQLAlchemy version changes the default enumeration behavior.
+
+    Also explicitly excludes Alembic's own version table: providing *any*
+    custom `include_name` apparently suppresses Alembic's normal default
+    protection for it — verified live, autogenerate proposed
+    `op.drop_table('alembic_version')` once this filter was added, which
+    would have destroyed Alembic's own bookkeeping table on the next
+    `upgrade`.
+    """
+    if type_ == "schema":
+        return name in (DB_SCHEMA, None)
+    if type_ == "table" and name == "alembic_version":
+        return False
+    return True
 
 
 def run_migrations_offline() -> None:
@@ -73,8 +95,41 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        # Order Wars' tables (and alembic_version itself) live under a
+        # dedicated schema, not `public` — see db/session.py's DB_SCHEMA
+        # docstring for why. Models stay schema-agnostic; this translate map
+        # is what actually redirects every emitted DDL/DML statement.
+        # Committed as its own transaction, explicitly — SQLAlchemy 2.0
+        # "begin once" connections auto-begin a transaction on first
+        # execute(), and leaving it open for context.begin_transaction() to
+        # inherit made Alembic treat it as externally managed and never
+        # commit it (verified live: the whole migration silently rolled
+        # back on connection close, schema and all, with no error raised).
+        connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {DB_SCHEMA}"))
+        connection.commit()
+        # schema_translate_map (below) only affects SQL Core-compiled
+        # DDL/DML — it does NOT affect Alembic's raw information_schema
+        # reflection queries used for autogenerate comparison, which follow
+        # the connection's actual default schema (Postgres's search_path,
+        # normally "public"). Verified live: without this, autogenerate
+        # compared against `public` — a schema shared with unrelated
+        # projects — and crashed trying to reflect their tables for a
+        # potential "drop" op (several, e.g. up_orders, weather_snapshots,
+        # material_properties, don't reflect cleanly, for reasons unrelated
+        # to this project). Setting search_path makes `order_wars` the
+        # default schema for reflection too, so comparison never sees
+        # `public` at all — simpler and more robust than trying to filter
+        # per-table after the fact.
+        connection.execute(text(f"SET search_path TO {DB_SCHEMA}"))
+        connection.commit()  # same "begin once" pitfall as CREATE SCHEMA above
+        connection = connection.execution_options(
+            schema_translate_map={None: DB_SCHEMA}
+        )
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema=DB_SCHEMA,
+            include_name=_include_name,
         )
 
         with context.begin_transaction():

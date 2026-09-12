@@ -24,9 +24,14 @@ resort. See `.env.example` for the keys and model overrides.
 ## Run it
 
 ```bash
-python -m agents.graph   # Phase 4: N factions on the real map, live LLM calls
-pytest tests/            # mocked, no live API calls
+python -m agents.graph      # Phase 4 demo: N factions, no persistence
+python -m game.run_game     # Phase 5: full game loop, persists to Postgres (needs DATABASE_URL)
+pytest tests/                # mocked, no live API/DB calls
 ```
+
+`game.run_game` needs `DATABASE_URL` in `.env` (see `.env.example`) — it
+writes every game to Postgres. `agents.graph`'s demo doesn't persist
+anything, useful for a quick check without a database configured.
 
 ## Phase status
 
@@ -35,7 +40,8 @@ pytest tests/            # mocked, no live API calls
 - [x] Phase 2 — multi-agent coordination (`agents/`)
 - [x] Phase 3 — map/geo generation (`map_data/`)
 - [x] Phase 4 — connect agents to the map (`agents/`, `game/`)
-- [ ] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
+- [~] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
+      — game loop + Postgres persistence done; backend/frontend not started
 - [ ] Phase 6 — eval + annotation (`eval/`)
 
 See `claude.md` for what each phase covers and the "Progress log" for what's

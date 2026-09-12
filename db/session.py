@@ -16,6 +16,16 @@ from dotenv import load_dotenv
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+# All Order Wars tables live under this Postgres schema, not `public` — the
+# Neon database this connects to is shared with unrelated projects (verified
+# by inspection: it already had tables like `documents`, `materials`,
+# `up_orders` with no relation to this app). Applied via
+# `schema_translate_map` rather than hardcoding `schema="order_wars"` onto
+# the models in db/models.py, so those models — and the SQLite-backed tests
+# that build them with a plain `create_engine("sqlite://")` — stay
+# schema-agnostic; only a real Postgres connection gets translated.
+DB_SCHEMA = "order_wars"
+
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
 
@@ -46,7 +56,10 @@ def get_engine() -> Engine:
                 "from the Neon console into .env as DATABASE_URL (this is "
                 "separate from NEON_API_KEY, which only manages Neon projects)."
             )
-        _engine = create_engine(_normalized_url(database_url))
+        _engine = create_engine(
+            _normalized_url(database_url),
+            execution_options={"schema_translate_map": {None: DB_SCHEMA}},
+        )
     return _engine
 
 

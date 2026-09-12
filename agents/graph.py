@@ -155,6 +155,12 @@ def faction_turn(state: GameState) -> dict:
         f"Turn {round_number} — {faction['name']} ({action.action_type}): "
         f"{resolved['resolution']} — {action.rationale}"
     )
+    last_event = {
+        "turn": round_number,
+        "faction_id": faction_id,
+        **action.model_dump(),
+        "resolution": resolved["resolution"],
+    }
 
     return {
         "factions": factions,
@@ -163,6 +169,7 @@ def faction_turn(state: GameState) -> dict:
         "pending_proposals": resolved["pending_proposals"],
         "active_faction_idx": next_idx,
         "turn": next_turn,
+        "last_event": last_event,
         "log": [log_line],
     }
 
@@ -188,12 +195,11 @@ def build_graph():
     return builder.compile()
 
 
-def run(faction_configs: list[dict], max_turns: int = 3) -> GameState:
-    """Run a game. Each entry in `faction_configs` is a dict with
-    `faction_id`, `name`, `role_preset`, and `home_province` (a real province
-    id from `map_data/provinces.geojson` — the faction's sole starting
-    territory).
-    """
+STARTING_RESOURCES = {"gold": 20}
+STARTING_UNITS = {"legion": 2}
+
+
+def require_llm_configured() -> None:
     load_dotenv()
     if not any(
         os.environ.get(key)
@@ -204,6 +210,17 @@ def run(faction_configs: list[dict], max_turns: int = 3) -> GameState:
             "at least one of GROQ_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY."
         )
 
+
+def initial_state_for(faction_configs: list[dict], max_turns: int) -> GameState:
+    """Build the starting `GameState` for a game. Each entry in
+    `faction_configs` is a dict with `faction_id`, `name`, `role_preset`, and
+    `home_province` (a real province id from `map_data/provinces.geojson` —
+    the faction's sole starting territory).
+
+    Shared by `run()` (below, single blocking `.invoke()`) and
+    `game/run_game.py` (which needs the same state but drives the graph via
+    `.stream()` instead, to persist and check win conditions turn-by-turn).
+    """
     factions: dict[str, FactionState] = {
         cfg["faction_id"]: {
             "faction_id": cfg["faction_id"],
@@ -211,14 +228,14 @@ def run(faction_configs: list[dict], max_turns: int = 3) -> GameState:
             "role_preset": cfg["role_preset"],
             "intent": None,
             "last_action": None,
-            "resources": {"gold": 20},
-            "units": {"legion": 2},
+            "resources": dict(STARTING_RESOURCES),
+            "units": dict(STARTING_UNITS),
         }
         for cfg in faction_configs
     }
     province_owner = {cfg["home_province"]: cfg["faction_id"] for cfg in faction_configs}
 
-    initial_state: GameState = {
+    return {
         "turn": 0,
         "max_turns": max_turns,
         "turn_order": [cfg["faction_id"] for cfg in faction_configs],
@@ -227,30 +244,42 @@ def run(faction_configs: list[dict], max_turns: int = 3) -> GameState:
         "province_owner": province_owner,
         "diplomatic_status": {},
         "pending_proposals": {},
+        "last_event": None,
         "log": [],
     }
 
+
+def run(faction_configs: list[dict], max_turns: int = 3) -> GameState:
+    """Run a game to completion in one blocking call — for the CLI demo and
+    tests. `game/run_game.py` is the persistence-aware, turn-by-turn entrypoint.
+    """
+    require_llm_configured()
+    initial_state = initial_state_for(faction_configs, max_turns)
     graph = build_graph()
     # Default recursion_limit (25) is too low once turns * factions grows.
     config = {"recursion_limit": max_turns * len(faction_configs) + 10}
     return graph.invoke(initial_state, config)
 
 
+# Rome/Carthage/Gaul, matching the theater map_data/generate_map.py tiled.
+# Shared by the CLI demo below and game/run_game.py's default scenario.
+DEMO_FACTIONS = [
+    {
+        "faction_id": "rome", "name": "Rome", "role_preset": "expansionist",
+        "home_province": "831e80fffffffff",  # Italy 20
+    },
+    {
+        "faction_id": "carthage", "name": "Carthage", "role_preset": "warmonger",
+        "home_province": "83386efffffffff",  # Tunisia 2
+    },
+    {
+        "faction_id": "gaul", "name": "Gaul", "role_preset": "isolationist",
+        "home_province": "833968fffffffff",  # France 31
+    },
+]
+
+
 if __name__ == "__main__":
-    demo_factions = [
-        {
-            "faction_id": "rome", "name": "Rome", "role_preset": "expansionist",
-            "home_province": "831e80fffffffff",  # Italy 20
-        },
-        {
-            "faction_id": "carthage", "name": "Carthage", "role_preset": "warmonger",
-            "home_province": "83386efffffffff",  # Tunisia 2
-        },
-        {
-            "faction_id": "gaul", "name": "Gaul", "role_preset": "isolationist",
-            "home_province": "833968fffffffff",  # France 31
-        },
-    ]
-    result = run(demo_factions, max_turns=3)
+    result = run(DEMO_FACTIONS, max_turns=3)
     for line in result["log"]:
         print(line)

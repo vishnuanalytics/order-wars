@@ -228,6 +228,11 @@ class FactionStateSnapshot(Base):
     turn: Mapped[int] = mapped_column(index=True)
     resources: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     territory_count: Mapped[int] = mapped_column(default=0)
+    # Added in Phase 5, alongside territory_count: the count alone can't
+    # render a map — the frontend needs to know *which* provinces, not just
+    # how many. The latest snapshot per faction is enough to reconstruct
+    # full board ownership without replaying the entire game_events history.
+    territory: Mapped[list] = mapped_column(JSONVariant, default=list)
     unit_count: Mapped[int] = mapped_column(default=0)
 
     game: Mapped[Game] = relationship(back_populates="snapshots")

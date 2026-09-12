@@ -47,6 +47,12 @@ class GameState(TypedDict):
     `pending_proposals` is keyed `"{proposer}->{target}"` (order matters —
     it's a one-sided offer until the target reciprocates) with a
     `agents.actions.ProposalType` value.
+
+    `last_event` is a self-describing record of the most recently resolved
+    turn (turn/faction_id/the action's fields/its resolution) — added so
+    `game/run_game.py`'s persistence layer (and later the backend's
+    WebSocket broadcast) can consume "what just happened" directly instead
+    of diffing consecutive states to figure it out.
     """
 
     turn: int
@@ -57,4 +63,5 @@ class GameState(TypedDict):
     province_owner: dict[str, str]
     diplomatic_status: dict[str, str]
     pending_proposals: dict[str, str]
+    last_event: dict | None
     log: Annotated[list[str], operator.add]

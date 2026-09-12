@@ -66,20 +66,46 @@ retrofitting later.
 
 ## Persistence (Neon Postgres)
 
-The ORM models and Alembic migration for this schema are implemented
-(`db/models.py`, `db/migrations/`) and verified against a real Postgres
-instance, but the running app **does not connect to a database yet** —
-nothing in `agents/`, `game/`, or `backend/` imports `db.session`. Wiring it
-into the actual game loop/backend waits for Phase 5; building schema for
-state that doesn't exist yet (no game loop, no eval) would violate the
-Non-goals below, but designing and testing the schema itself is done so Phase
-5 has a verified target, not a guess.
+The ORM models, Alembic migration, and connection layer (`db/models.py`,
+`db/migrations/`, `db/session.py`) are implemented and, as of Phase 5,
+actually wired up and verified against the real Neon database in
+`DATABASE_URL` — `db/session.py`'s `session_scope()` does real reads/writes.
 
 - **Credential note:** `NEON_API_KEY` (already in `.env`) is Neon's
   management/control-plane API key (create/list projects & branches) — it is
   *not* a database connection string. Actually reading/writing rows needs a
-  separate Postgres connection string, conventionally `DATABASE_URL`, added
-  when persistence work actually starts.
+  separate Postgres connection string, conventionally `DATABASE_URL`.
+- **Schema isolation:** the Neon database behind `DATABASE_URL` is shared
+  with unrelated projects — verified by inspection: it already held tables
+  like `documents`, `materials`, `up_orders`, plus `auth`/`pgrst`/`neon_auth`
+  schemas from other tooling entirely. Every Order Wars table therefore
+  lives under a dedicated `order_wars` Postgres schema (`db/session.py`'s
+  `DB_SCHEMA`), applied via SQLAlchemy's `schema_translate_map` at the
+  engine level rather than hardcoded onto the models — so `db/models.py` and
+  the SQLite-backed tests stay schema-agnostic, and only a real Postgres
+  connection gets redirected. `db/migrations/env.py` creates the schema
+  (`CREATE SCHEMA IF NOT EXISTS order_wars`, committed as its own explicit
+  transaction — see the code comment for a real bug this caught: a
+  SQLAlchemy 2.0 "begin once" connection auto-begins a transaction on the
+  first raw `execute()`, and leaving that open for Alembic's
+  `context.begin_transaction()` to inherit made Alembic treat it as
+  externally managed and silently never commit — the *entire* migration,
+  schema included, rolled back on connection close with no error raised;
+  this bit twice, since a second raw statement added later, `SET search_path`,
+  reintroduced the exact same uncommitted-transaction problem and needed its
+  own explicit `.commit()` too) and puts `alembic_version` there too, so the
+  whole thing is self-contained and `public`/other projects' tables are
+  never touched. `schema_translate_map` only affects SQL Core-compiled
+  DDL/DML, not Alembic's raw information_schema reflection queries used for
+  autogenerate comparison (those follow the connection's actual default
+  schema, i.e. Postgres's `search_path`) — without also setting
+  `search_path` to `order_wars`, autogenerate compared against `public` and
+  crashed trying to reflect unrelated tables it couldn't handle (e.g.
+  `up_orders`, `weather_snapshots`). A custom `include_name` filter is also
+  needed once you touch this at all — supplying one apparently suppresses
+  Alembic's normal default protection for its own `alembic_version` table,
+  which showed up as a proposed (never run) `op.drop_table('alembic_version')`
+  in an autogenerate diff.
 - **Postgres is the source of truth for game history — flat-file
   `logs/<game_id>/` is dropped, not mirrored.** `eval/run_eval.py` reads from
   Postgres once Phase 5 lands; there is no separate flat-file convention to
@@ -117,10 +143,12 @@ Non-goals below, but designing and testing the schema itself is done so Phase
     (`langgraph-checkpoint-postgres`) for resumable graph runs. Not required
     for the phase's functional goal, and uses its own tables, not the schema
     above.
-  - Phase 5 — wire the schema above into the app: FastAPI backend
-    reads/writes it directly, scenario-editor UI writes
-    `scenarios`/`scenario_factions`, `game/` writes `game_events` and
-    `faction_state_snapshots` as ticks run.
+  - Phase 5 — `game/run_game.py` writes `games`/`game_factions`/
+    `game_events`/`faction_state_snapshots`/`diplomatic_relations` as ticks
+    run (done). Still to come: the FastAPI backend reading it for the
+    frontend, and a scenario-editor UI writing `scenarios`/
+    `scenario_factions` (currently only `game/run_game.py` writes those,
+    for its own ad-hoc runs).
   - Phase 6 — add `eval_scores`/`annotations`.
 
 ## How to work in this repo
@@ -360,10 +388,51 @@ came up.
         that war is currently symbolic — neither side can ever `move_army`
         into the other without a land bridge. Worth knowing before treating
         "at war" as meaning "actively fighting."
-- [ ] Phase 5 — game loop + visualization — includes a scenario-editor UI
-      (add/configure factions, assign role presets, tweak and rerun); Neon
-      Postgres is the sole store for run history, no flat-file logs (see
-      "Persistence" for the target schema, already decided)
+- [~] Phase 5 — game loop + visualization (in progress: game loop + Postgres
+      wiring done; FastAPI/WebSocket backend, Leaflet/D3 frontend, and the
+      scenario-editor UI are not built yet)
+  - [x] Real Neon persistence wired up (`db/session.py` now actually used
+        by the app, not just designed): `DATABASE_URL` added, connection
+        verified, and every table isolated under an `order_wars` Postgres
+        schema (`db/session.py`'s `DB_SCHEMA`) because the Neon database
+        turned out to be shared with unrelated projects — see "Persistence"
+        for the transaction/reflection bugs this surfaced and fixed
+        (uncommitted-transaction rollback biting twice, and autogenerate
+        crashing on other projects' tables via `public`'s default schema)
+  - [x] Schema gap found and fixed via a proper migration, not a
+        workaround: `faction_state_snapshots.territory_count` (a number)
+        can't render a map — added `territory` (the actual province id
+        list) so the frontend can reconstruct board state from the latest
+        snapshot per faction without replaying `game_events`
+  - [x] `agents/state.py`/`agents/graph.py`: added `last_event` to
+        `GameState` — a self-describing record of the most recently
+        resolved turn, so the persistence layer (and later the backend's
+        broadcast) doesn't need to diff consecutive states to know what
+        just happened. `agents/graph.py`'s `run()` refactored to share
+        `initial_state_for()` with the new entrypoint below rather than
+        duplicating state construction
+  - [x] `game/run_game.py` (`python -m game.run_game`, per "Commands"):
+        drives the graph via `.stream()` instead of `run()`'s single
+        blocking `.invoke()`, persisting `GameEvent`/`FactionStateSnapshot`/
+        `DiplomaticRelation` rows turn-by-turn and checking a win condition
+        (`check_winner`: elimination — exactly one faction still holds
+        territory) after each turn rather than only at the end. Writes real
+        `Scenario`/`ScenarioFaction`/`Game`/`GameFaction` rows too — an
+        ad-hoc CLI run is still a real one; the future scenario-editor UI
+        is just another way to populate the same rows
+  - [x] `tests/test_run_game.py`: in-memory SQLite (`StaticPool`, since the
+        loop opens several separate sessions and plain `sqlite://` would
+        otherwise hand each one an unrelated empty database), no live LLM
+        or Neon calls
+  - [x] Verified live end-to-end against real Groq/OpenRouter/Claude *and*
+        real Neon: a 4-turn, 3-faction run produced 1 scenario, 3
+        scenario_factions, 1 game (correctly marked COMPLETED, no winner —
+        max turns reached with all 3 still alive), 3 game_factions, 12
+        game_events, 12 faction_state_snapshots, and 1 diplomatic_relation
+        (Carthage's declare_war on Gaul) — all under `order_wars`, `public`
+        and other projects' tables untouched
+  - [ ] Not yet built: FastAPI/WebSocket backend (`backend/`), Leaflet/D3
+        frontend (`frontend/`), and the scenario-editor UI
 - [ ] Phase 6 — eval + annotation
 
 ## Non-goals
@@ -378,7 +447,8 @@ came up.
   LLM agents handling negotiation content within that scaffold, not expected
   to spontaneously emerge from open-ended prompting (see "Agent & simulation
   design").
-- No wiring Postgres into the running app (`agents/`, `game/`, `backend/`)
-  ahead of Phase 5 — the ORM models/migrations in `db/` were built early by
-  explicit request (see "Persistence" and the Progress log), but that's
-  schema design, not the app depending on a database before it needs one.
+- The ORM models/migrations in `db/` were built ahead of Phase 5 by explicit
+  request (see "Persistence" and the Progress log) — that was schema design
+  before the app needed it, not a violation of the phase gate above. Actual
+  wiring (the app reading/writing through `db.session`) is Phase 5, now
+  underway.

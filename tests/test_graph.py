@@ -34,6 +34,7 @@ def _state(factions: dict[str, FactionState], province_owner: dict[str, str], **
         "province_owner": province_owner,
         "diplomatic_status": {},
         "pending_proposals": {},
+        "last_event": None,
         "log": [],
     }
     base.update(overrides)
