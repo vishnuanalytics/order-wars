@@ -16,5 +16,13 @@ sqlalchemy
 psycopg[binary]
 alembic
 
-# Phase 3+ deps (geopandas, fastapi, deepeval, ...) are added when we reach
-# those phases — see claude.md "Project phases".
+# Phase 3+ deps (fastapi, deepeval, ...) are added when we reach those
+# phases — see claude.md "Project phases".
+
+# Phase 3: map/geo generation — see map_data/generate_map.py.
+# Only generate_map.py imports these; the game itself just reads the
+# committed provinces.geojson, no geo libraries needed at runtime.
+geopandas
+shapely
+pyogrio
+h3

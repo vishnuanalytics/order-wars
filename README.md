@@ -33,7 +33,7 @@ pytest tests/            # mocked, no live API calls
 - [x] Phase 0 — project scaffolding
 - [x] Phase 1 — LangGraph agent basics (`agents/`) — superseded by Phase 2
 - [x] Phase 2 — multi-agent coordination (`agents/`)
-- [ ] Phase 3 — map/geo generation (`map_data/`)
+- [x] Phase 3 — map/geo generation (`map_data/`)
 - [ ] Phase 4 — connect agents to the map
 - [ ] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
 - [ ] Phase 6 — eval + annotation (`eval/`)

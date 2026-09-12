@@ -292,7 +292,33 @@ came up.
         (300 for intent, 600 for the action call)
   - [x] `tests/test_graph.py` rewritten for the N-faction node/routing (still
         fully mocked, no live calls in the suite)
-- [ ] Phase 3 — map/geo generation
+- [x] Phase 3 — map/geo generation
+  - [x] `map_data/generate_map.py`: downloads Natural Earth 50m land +
+        admin-0 country polygons (cached under `map_data/raw/`, gitignored),
+        clips to a Western/Central Mediterranean bounding box (Iberia,
+        central-to-southern France, Italy, North Africa coast, Balkans,
+        Greece — the Rome/Carthage/Gaul theater, not the whole Roman world;
+        see the script docstring for why lat_max is capped at 47, not
+        higher), tiles it with H3 hexagons at resolution 3 (~12,400 km²/hex)
+  - [x] Uses `contain="overlap"` + a `land_frac >= 0.01` filter rather than
+        H3's default center-point containment — verified empirically that
+        center containment silently drops small/thin islands (missed
+        Corsica, Cyprus, Malta, Mallorca at this resolution) even though
+        they're real land
+  - [x] Each province gets a `name` (dominant overlapping country + index,
+        e.g. "Italy 1") and `neighbors` (H3 grid-adjacency intersected with
+        the actual kept province set, so provinces only neighbor real land,
+        not filtered-out sea hexes)
+  - [x] `map_data/provinces.geojson` committed: 372 provinces, verified —
+        unique ids/names, symmetric adjacency, no orphans or self-loops, and
+        the three Phase 2 demo factions' homelands (Italy, Tunisia, France)
+        all present
+  - [x] `tests/test_map_data.py`: validates the committed GeoJSON directly
+        (schema, uniqueness, adjacency symmetry) — regenerating the map
+        needs geopandas/h3/network access and stays a separate offline step,
+        not part of the test suite
+  - [ ] Not yet done: nothing in `agents/`/`game/` reads `provinces.geojson`
+        — wiring factions to real provinces is Phase 4
 - [ ] Phase 4 — agents on the map — also where territory/resources/units and
       the per-pair diplomatic status matrix get defined
 - [ ] Phase 5 — game loop + visualization — includes a scenario-editor UI
