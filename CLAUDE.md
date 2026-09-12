@@ -230,6 +230,11 @@ came up.
   - [x] `agents/graph.py` assembled, runnable as `python -m agents.graph`
   - [x] `tests/test_graph.py` covers the pure nodes, the routing function,
         and a full mocked run (no live API calls in the test suite)
+  - **Superseded by Phase 2**: the single-faction `GameState`
+        (`last_decision`, one `agent_decide` node) described above no
+        longer exists in code — `agents/state.py` and `agents/graph.py` now
+        hold the Phase 2 N-faction schema/graph below. Kept here as a record
+        of what Phase 1 delivered at the time.
 - [x] Persistence schema (ahead of Phase 5, by design — see "Persistence
       (Neon Postgres)")
   - [x] `db/models.py`: SQLAlchemy 2.0 models for all 7 tables (`scenarios`,
@@ -253,9 +258,40 @@ came up.
   - [ ] Not yet done: nothing in `agents/`, `game/`, or `backend/` imports
         `db.session` — the app itself doesn't connect to Postgres until
         Phase 5
-- [ ] Phase 2 — multi-agent coordination — build for N factions, hierarchical
-      per-faction roles, and structured tool-call actions from the start (see
-      "Agent & simulation design"), not a hardcoded pair of narrating agents
+- [x] Phase 2 — multi-agent coordination
+  - [x] `agents/state.py`: `FactionState` (per-faction `intent` +
+        `last_action`) and `GameState` generalized to N factions
+        (`turn_order`, `active_faction_idx`) instead of a hardcoded pair —
+        `turn` now counts completed full rounds, not individual actions
+  - [x] `agents/roles.py`: 5 role-preset prompt fragments (expansionist,
+        warmonger, diplomat_trader, isolationist, custom), mirroring
+        `db.models.RolePreset`'s values by hand (no `db` import from
+        `agents/` yet — that's still Phase 5)
+  - [x] `agents/actions.py`: `FactionAction` Pydantic schema
+        (`action_type`/`target_faction`/`rationale`) — deliberately abstract,
+        no map/unit targets, since those don't exist until Phase 4
+  - [x] `agents/llm.py`: `build_llm(schema=...)` binds
+        `.with_structured_output()` per-provider *before* combining into the
+        fallback chain (can't bind after — `RunnableWithFallbacks` isn't a
+        `BaseChatModel`)
+  - [x] `agents/graph.py`: single reusable `faction_turn` node loops over
+        `turn_order` (works for any N, not just 2) with a two-layer
+        hierarchy — a leader call refreshes `intent` every
+        `INTENT_REFRESH_INTERVAL` (3) turns, an executor call decides that
+        turn's structured `FactionAction` within it. Full role specialization
+        (separate military/diplomat/economic agents) is deferred to
+        Phase 4/5 — there's no distinct territory/resource/diplomacy state
+        for them to act on yet, so splitting now would be hollow
+  - [x] Verified live (not just mocked) against the real Groq -> OpenRouter
+        -> Claude chain: a 3-faction demo run showed role presets visibly
+        shaping behavior (Rome/expansionist expanded, Carthage/warmonger
+        raided Gaul, Gaul/isolationist fortified). That run also surfaced a
+        real bug — Groq's hidden-reasoning tokens truncated the structured
+        tool-call JSON at `max_tokens=200`, same class of issue Phase 1 had
+        already noted for plain completions — fixed by raising the budget
+        (300 for intent, 600 for the action call)
+  - [x] `tests/test_graph.py` rewritten for the N-faction node/routing (still
+        fully mocked, no live calls in the suite)
 - [ ] Phase 3 — map/geo generation
 - [ ] Phase 4 — agents on the map — also where territory/resources/units and
       the per-pair diplomatic status matrix get defined
