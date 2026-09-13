@@ -1183,10 +1183,53 @@ predicted.
   calls needed (pure rules logic; the only prompt change is explanatory
   text).
 
-Stages 10–11 will each get their own short validation pass against the
-real code before implementation (the same way stages 1-9 needed real
-data/code to calibrate correctly, not just up-front assumptions), landing
-as their own commits in this same order.
+### Stage 10 — coalition wars (done)
+
+- Realizes the "Diplomacy and coalitions are rule-triggered, not purely
+  emergent" principle from "Agent & simulation design" — the one bullet in
+  that section not yet touched by any earlier stage. No new `FactionAction`
+  fields, no new `GameState` field: `check_call_to_arms` (`game/rules.py`,
+  made public — no leading underscore — specifically because, unlike every
+  other stage's internal helper, it's genuinely needed both inside
+  `resolve_action` and from `agents/graph.py`'s prompt/dispatcher code) is
+  computed fresh from existing state every time, the same way
+  `_siege_summary`/`_trade_summary` already are — nothing new to persist.
+- `faction_power` (also public) is a deliberately simple additive score
+  (territory + units + resources/10) for detecting a *serious* imbalance —
+  explicitly not the same thing as `_effective_strength`'s matchup-specific
+  combat math, which needs a concrete enemy composition to weigh
+  unit-type counters against and doesn't apply to a general "how strong is
+  this faction overall" question.
+- `check_call_to_arms(state, faction_id)` flags each of `faction_id`'s
+  allies currently at war with a third faction that outweighs them by
+  `COALITION_POWER_RATIO` (1.5x) — purely informational, matching the
+  plan's "additive, no combat rewrite": no state mutation, no forced
+  action. It surfaces three ways: (1) appended to the acting faction's
+  `resolution` string, same pattern as rebellion/tribute notes; (2) in the
+  diplomat specialist's prompt, explicitly suggesting `declare_war`, trade,
+  or another response; (3) as a new `_dispatch_specialist` priority — an
+  active call to arms routes to diplomatic, between the existing
+  incoming-proposal check and the role-preset rotation fallback, so an
+  ally's plight gets a timely response rather than waiting on the
+  rotation.
+- `tests/test_rules.py`: direct `faction_power` computation, and
+  `check_call_to_arms` coverage (flags a genuinely outmatched ally, but
+  not a non-ally, not a close matchup below the ratio, and never the
+  checking faction's *own* war) plus a `resolve_action` integration test
+  confirming the note reaches `resolution`. 158/158 tests pass, no live
+  LLM calls needed (pure rules logic; the only prompt change is
+  explanatory text). One real bug caught while writing the dispatcher
+  test, not by inspection: `tests/test_graph.py`'s local `_faction` helper
+  has no `legions=` keyword (unlike `test_rules.py`'s different, same-named
+  helper) — passing it silently added a bogus dict key instead of raising,
+  so the first version of the test used identical (default) unit counts
+  for both factions and never actually exercised the outmatched-ally
+  branch; fixed by passing `units={"legion": N}` directly.
+
+Stage 11 will get its own short validation pass against the real code
+before implementation (the same way stages 1-10 needed real data/code to
+calibrate correctly, not just up-front assumptions), landing as its own
+commit in this same order.
 
 ## Multi-level agent hierarchy (done, separate from the gameplay-depth
 ## rollout above — an agent-architecture change, not a game mechanic)

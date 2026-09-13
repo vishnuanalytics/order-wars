@@ -10,6 +10,7 @@ from agents.graph import (
     route_after_turn,
 )
 from agents.state import FactionState, GameState
+from game.rules import pair_key
 
 ROME_HOME = "831e80fffffffff"  # Italy 20
 ROME_NEIGHBOR = "831e81fffffffff"  # Italy 19, adjacent to ROME_HOME
@@ -228,6 +229,23 @@ def test_dispatch_specialist_prioritizes_an_incoming_proposal():
         {"rome": _faction("rome", "Rome", role_preset="warmonger")},
         {ROME_HOME: "rome"},
         pending_proposals={"carthage->rome": "truce"},
+        turn=0,  # warmonger's round-1 rotation slot is "military", not diplomatic
+    )
+    assert _dispatch_specialist(state, "rome") == "diplomatic"
+
+
+def test_dispatch_specialist_prioritizes_an_allys_call_to_arms():
+    state = _state(
+        {
+            "rome": _faction("rome", "Rome", role_preset="warmonger"),
+            "carthage": _faction("carthage", "Carthage", units={"legion": 2}),
+            "gaul": _faction("gaul", "Gaul", units={"legion": 30}),
+        },
+        {ROME_HOME: "rome"},
+        diplomatic_status={
+            pair_key("carthage", "rome"): "alliance",
+            pair_key("carthage", "gaul"): "war",
+        },
         turn=0,  # warmonger's round-1 rotation slot is "military", not diplomatic
     )
     assert _dispatch_specialist(state, "rome") == "diplomatic"

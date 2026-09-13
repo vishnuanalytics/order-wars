@@ -70,6 +70,22 @@ actually owned by the payer at that moment (it might not be — a rebellion
 or another war could have taken it in the interim), transfers that too,
 then sets `diplomatic_status` to "truce". A payer short on the promised
 resource pays what it can, same non-breaking simplification as trade.
+
+Coalition wars realize CLAUDE.md's "Agent & simulation design" principle
+that coalitions should be rule-triggered, not purely emergent: `game
+logic computes relative power ... and triggers negotiation windows when
+it's lopsided`. `check_call_to_arms` computes a simple additive power
+score (`faction_power`: territory + units + resources, not the same
+thing as `_effective_strength`'s matchup-specific combat math, which
+needs a concrete enemy composition to weigh counters against and doesn't
+apply here) and flags when an ally is at war with a third faction that
+outweighs them by `COALITION_POWER_RATIO`. It's purely informational —
+no state changes, no forced action, doesn't touch combat at all — an
+ally's plight becomes visible (in the resolution string, the same way
+rebellion/tribute notes append there, and in the diplomat specialist's
+prompt) so a faction *can* choose to join the war, trade, or send
+tribute, not that it *must*. This is deliberately additive: nothing about
+sieges, combat resolution, or existing diplomacy mechanics changes.
 """
 
 import hashlib
@@ -161,6 +177,12 @@ MAX_PROVINCE_DEVELOPMENT = 3
 DEVELOP_BASE_COST = 15  # gold, times (current_level + 1)
 DEVELOPMENT_YIELD_BONUS_PER_LEVEL = 1  # extra terrain-resource income per level
 DEVELOPMENT_REBELLION_REDUCTION_PER_LEVEL = 0.05  # subtracted from REBELLION_CHANCE_PER_TURN
+
+# Coalition wars: how much a war opponent's power must outweigh an ally's
+# own power before a call to arms is flagged for that ally's allies (see
+# the module docstring). 1.5 means "at least 50% stronger" — comfortably
+# past an even fight, not merely "slightly ahead."
+COALITION_POWER_RATIO = 1.5
 DEVELOPMENT_DEFENSE_BONUS_PER_LEVEL = 0.1  # added on top of TERRAIN_DEFENSE_BONUS
 
 
@@ -175,6 +197,49 @@ def territory_of(state: GameState, faction_id: str) -> list[str]:
 
 def diplomatic_status_between(state: GameState, faction_a: str, faction_b: str) -> str:
     return state["diplomatic_status"].get(pair_key(faction_a, faction_b), "neutral")
+
+
+def faction_power(state: GameState, faction_id: str) -> float:
+    """A simple additive power heuristic (territory + units + resources)
+    for detecting a *serious* imbalance between factions — not the same
+    thing as `_effective_strength`'s matchup-specific combat math, which
+    needs a concrete enemy unit composition to weigh counters against and
+    doesn't apply to a general "how strong is this faction overall" check.
+    """
+    faction = state["factions"][faction_id]
+    territory = len(territory_of(state, faction_id))
+    units = sum(faction["units"].values())
+    resources = sum(faction["resources"].values()) / 10
+    return territory + units + resources
+
+
+def check_call_to_arms(state: GameState, faction_id: str) -> list[str]:
+    """For each of `faction_id`'s allies currently at war with a third
+    faction that outweighs them by COALITION_POWER_RATIO, returns a
+    human-readable call-to-arms note. Purely informational: no state
+    mutation, no forced action — see the module docstring for why this
+    realizes "rule-triggered coalitions" as visibility, not automatic
+    participation.
+    """
+    notes = []
+    for ally_id in state["turn_order"]:
+        if ally_id == faction_id:
+            continue
+        if diplomatic_status_between(state, faction_id, ally_id) != "alliance":
+            continue
+        ally_power = faction_power(state, ally_id)
+        for enemy_id in state["turn_order"]:
+            if enemy_id in (faction_id, ally_id):
+                continue
+            if diplomatic_status_between(state, ally_id, enemy_id) != "war":
+                continue
+            enemy_power = faction_power(state, enemy_id)
+            if ally_power > 0 and enemy_power >= ally_power * COALITION_POWER_RATIO:
+                notes.append(
+                    f"call to arms: your ally {ally_id} is outmatched by "
+                    f"{enemy_id} ({enemy_power:.1f} vs {ally_power:.1f} power)"
+                )
+    return notes
 
 
 def _effective_strength(units: dict[str, int], enemy_units: dict[str, int]) -> float:
@@ -454,6 +519,7 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         faction_id, owned, province_owner, province_captured_turn, province_development,
         state["capitals"].get(faction_id), state["rebellion_seed"], state["turn"],
     )
+    call_to_arms = check_call_to_arms(state, faction_id)
 
     # A siege only persists while its attacker keeps pressing that exact
     # target every one of their own turns — abandon any of this faction's
@@ -578,6 +644,8 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
 
     if rebelled:
         resolution += f" (meanwhile, {', '.join(rebelled)} rebelled and reverted to unclaimed)"
+    if call_to_arms:
+        resolution += f" ({'; '.join(call_to_arms)})"
 
     return {
         "factions": factions,

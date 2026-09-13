@@ -36,6 +36,7 @@ from game.rules import (
     SIEGE_TURNS_TO_DECIDE,
     SUPPLY_FREE_RANGE,
     UNIT_COSTS,
+    check_call_to_arms,
     diplomatic_status_between,
     resolve_action,
     territory_of,
@@ -157,13 +158,17 @@ def _dispatch_specialist(state: GameState, faction_id: str) -> str:
     design" for why one dispatched decision/turn, not three parallel ones).
 
     Real state signals override the role-preset-ordered rotation fallback,
-    so pressing sieges and answering proposals aren't left to chance:
+    so pressing sieges, answering proposals, and an ally's call to arms
+    aren't left to chance:
     1. An active siege this faction is pressing must be pressed again every
        one of its own turns or it lapses (game.rules.SIEGE_TURNS_TO_DECIDE)
        — always route to military to protect that investment.
     2. An incoming pending proposal deserves a timely response, not one
        that depends on the rotation happening to land on diplomatic.
-    3. Otherwise, rotate through this faction's role-preset-ordered
+    3. An ally outmatched in a war (game.rules.check_call_to_arms) deserves
+       a timely diplomatic response too — join the war, send tribute, or
+       otherwise react — rather than waiting for the rotation.
+    4. Otherwise, rotate through this faction's role-preset-ordered
        priorities (agents.roles.specialist_order) by round number — a full
        permutation of all three domains, so no faction is ever permanently
        locked out of expansion/economy/diplomacy.
@@ -171,6 +176,8 @@ def _dispatch_specialist(state: GameState, faction_id: str) -> str:
     if any(siege["attacker_id"] == faction_id for siege in state["sieges"].values()):
         return "military"
     if any(key.endswith(f"->{faction_id}") for key in state["pending_proposals"]):
+        return "diplomatic"
+    if check_call_to_arms(state, faction_id):
         return "diplomatic"
 
     role_preset = state["factions"][faction_id]["role_preset"]
@@ -251,6 +258,16 @@ def _economic_prompt(state: GameState, faction_id: str) -> str:
     )
 
 
+def _call_to_arms_note(state: GameState, faction_id: str) -> str:
+    notes = check_call_to_arms(state, faction_id)
+    if not notes:
+        return ""
+    return (
+        "An ally needs help: " + "; ".join(notes) + ". Consider joining the "
+        "war (declare_war), sending aid via trade, or another response.\n"
+    )
+
+
 def _diplomatic_prompt(state: GameState, faction_id: str) -> str:
     faction = state["factions"][faction_id]
     other_ids = _other_faction_ids(state, faction_id)
@@ -273,6 +290,7 @@ def _diplomatic_prompt(state: GameState, faction_id: str) -> str:
         "peace. They accept by negotiating proposal='tribute' back to you "
         "with no offer details of their own — this cashes in your offer "
         "immediately and declares a truce.\n"
+        f"{_call_to_arms_note(state, faction_id)}"
         "Choose this turn's action. For negotiate/declare_war, "
         f"target_faction must be one of: {', '.join(other_ids) or 'none'}. "
         "If ceding territory as part of tribute, target_province must be "

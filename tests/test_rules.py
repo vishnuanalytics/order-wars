@@ -16,7 +16,9 @@ from game.rules import (
     SIEGE_TURNS_TO_DECIDE,
     SUPPLY_FREE_RANGE,
     UNIT_COSTS,
+    check_call_to_arms,
     diplomatic_status_between,
+    faction_power,
     pair_key,
     resolve_action,
     territory_of,
@@ -728,6 +730,90 @@ def test_negotiate_tribute_payer_pays_only_what_affordable():
     result = resolve_action(state, "rome", _action("negotiate", target_faction="carthage", proposal="tribute"))
     assert result["factions"]["carthage"]["resources"]["gold"] == 0
     assert result["factions"]["rome"]["resources"]["gold"] == 20 + 10
+
+
+def test_faction_power_combines_territory_units_and_resources():
+    state = _state(province_owner={HOME: "rome", NEIGHBOR: "rome"})
+    # 2 territory + 2 units + (20 gold + 20 iron + 0 grain)/10 = 2 + 2 + 4 = 8.0
+    assert faction_power(state, "rome") == 8.0
+
+
+def test_check_call_to_arms_flags_an_outmatched_ally():
+    state = _state(
+        factions={
+            "rome": _faction("rome", "Rome"),
+            "carthage": _faction("carthage", "Carthage", legions=2),
+            "gaul": _faction("gaul", "Gaul", legions=30),
+        },
+        turn_order=["rome", "carthage", "gaul"],
+        diplomatic_status={
+            pair_key("rome", "carthage"): "alliance",
+            pair_key("carthage", "gaul"): "war",
+        },
+    )
+    notes = check_call_to_arms(state, "rome")
+    assert len(notes) == 1
+    assert "carthage" in notes[0]
+    assert "gaul" in notes[0]
+
+
+def test_check_call_to_arms_ignores_non_allies():
+    state = _state(
+        factions={
+            "rome": _faction("rome", "Rome"),
+            "carthage": _faction("carthage", "Carthage", legions=2),
+            "gaul": _faction("gaul", "Gaul", legions=30),
+        },
+        turn_order=["rome", "carthage", "gaul"],
+        diplomatic_status={pair_key("carthage", "gaul"): "war"},  # no alliance with rome
+    )
+    assert check_call_to_arms(state, "rome") == []
+
+
+def test_check_call_to_arms_ignores_close_matchups():
+    state = _state(
+        factions={
+            "rome": _faction("rome", "Rome"),
+            "carthage": _faction("carthage", "Carthage", legions=10),
+            "gaul": _faction("gaul", "Gaul", legions=11),  # only slightly stronger
+        },
+        turn_order=["rome", "carthage", "gaul"],
+        diplomatic_status={
+            pair_key("rome", "carthage"): "alliance",
+            pair_key("carthage", "gaul"): "war",
+        },
+    )
+    assert check_call_to_arms(state, "rome") == []
+
+
+def test_check_call_to_arms_does_not_flag_the_checking_factions_own_war():
+    """A faction never gets a call-to-arms note about its own war -- only
+    about an ally's."""
+    state = _state(
+        factions={
+            "rome": _faction("rome", "Rome", legions=2),
+            "carthage": _faction("carthage", "Carthage", legions=30),
+        },
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+    )
+    assert check_call_to_arms(state, "rome") == []
+
+
+def test_resolve_action_appends_call_to_arms_note_to_resolution():
+    state = _state(
+        factions={
+            "rome": _faction("rome", "Rome"),
+            "carthage": _faction("carthage", "Carthage", legions=2),
+            "gaul": _faction("gaul", "Gaul", legions=30),
+        },
+        turn_order=["rome", "carthage", "gaul"],
+        diplomatic_status={
+            pair_key("rome", "carthage"): "alliance",
+            pair_key("carthage", "gaul"): "war",
+        },
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert "call to arms" in result["resolution"]
 
 
 def test_territory_of_reflects_province_owner():
