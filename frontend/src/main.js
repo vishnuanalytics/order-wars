@@ -6,6 +6,7 @@ import { MapView } from "./mapView.js";
 import { ScenarioEditor } from "./scenarioEditor.js";
 import { GameView } from "./gameView.js";
 import { ReviewView } from "./reviewView.js";
+import { Tour } from "./tour.js";
 
 function switchTab(name) {
   document.querySelectorAll(".tab-button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
@@ -17,11 +18,17 @@ async function main() {
   const provinces = await getProvinces();
   mapView.loadProvinces(provinces.features);
 
-  const gameView = new GameView({ mapView });
-  await gameView.refreshGameList();
-
   const reviewView = new ReviewView();
   await reviewView.refreshGameList();
+
+  const gameView = new GameView({
+    mapView,
+    onReviewRequested: async (gameId) => {
+      switchTab("review");
+      await reviewView.selectGame(gameId);
+    },
+  });
+  await gameView.refreshGameList();
 
   const scenarioListEl = document.getElementById("scenario-list");
   const startGameButton = document.getElementById("start-game-button");
@@ -79,6 +86,10 @@ async function main() {
       if (button.dataset.tab === "review") reviewView.refreshGameList();
     });
   });
+
+  const tour = new Tour({ onStepChange: (tab) => { if (tab) switchTab(tab); } });
+  document.getElementById("help-tour-button").addEventListener("click", () => tour.start());
+  tour.startIfFirstVisit();
 }
 
 main().catch((err) => {

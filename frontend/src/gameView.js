@@ -2,8 +2,16 @@ import { startGame, getGame, getGameEvents, listGames, gameLiveSocketUrl } from 
 import { classifyEvent, escapeHtml } from "./utils.js";
 
 export class GameView {
-  constructor({ mapView }) {
+  constructor({ mapView, onGameComplete, onReviewRequested }) {
     this.mapView = mapView;
+    // Called once, when a watched (live) game finishes — see watchGame's
+    // stream_end handler. Not fired for loadReplay, since that's already
+    // the user re-visiting a finished game, not discovering it just ended.
+    this.onGameComplete = onGameComplete || (() => {});
+    // Called when the user clicks the completion banner's "see how each
+    // faction was scored" button — main.js wires this to switch to the
+    // Review tab with this game preselected.
+    this.onReviewRequested = onReviewRequested || (() => {});
     this.statusEl = document.getElementById("game-status");
     this.gameListEl = document.getElementById("game-list");
     this.gameDetailEl = document.getElementById("game-detail");
@@ -46,8 +54,9 @@ export class GameView {
         await this.refreshGameDetail();
       } else if (message.type === "stream_end") {
         this._closeSocket();
-        await this.refreshGameDetail();
+        const game = await this.refreshGameDetail();
         await this.refreshGameList();
+        if (game.status === "completed" || game.status === "failed") this.onGameComplete(game);
       } else if (message.type === "error") {
         this.setStatus(`error: ${message.message}`, "failed");
       }
@@ -124,7 +133,32 @@ export class GameView {
     }
     this.mapView.setOwnership(ownerByProvinceId);
 
+    // A direct port of game/rules.py's faction_power (territory + units +
+    // resources/10) — a simple "who's currently ahead" heuristic, not the
+    // matchup-specific combat math. Client-side because the backend
+    // doesn't expose it directly; keeping the same formula, not inventing
+    // a new one, is what keeps this bar meaningful rather than decorative.
+    const powerByFactionId = {};
+    for (const factionState of game.faction_states) {
+      const resourceTotal = Object.values(factionState.resources).reduce((a, b) => a + b, 0);
+      powerByFactionId[factionState.faction_id] =
+        factionState.territory.length + factionState.unit_count + resourceTotal / 10;
+    }
+    const maxPower = Math.max(1, ...Object.values(powerByFactionId));
+
+    const isFinished = game.status === "completed" || game.status === "failed";
+    const winner = game.factions.find((f) => f.id === game.winner_faction_id);
+    const banner = isFinished
+      ? `<div class="game-complete-banner">
+          <strong>${game.status === "failed" ? "Game failed." : winner ? `🏆 ${escapeHtml(winner.faction_name)} wins!` : "Game complete — no winner (max turns reached)."}</strong>
+          <button type="button" class="review-this-game-button" data-game-id="${game.id}">
+            See how each faction was scored →
+          </button>
+        </div>`
+      : "";
+
     this.gameDetailEl.innerHTML = `
+      ${banner}
       <ul class="faction-summary">
         ${game.factions
           .map((faction) => {
@@ -140,15 +174,27 @@ export class GameView {
                   .join(", ")
               : "";
             const units = state ? `${state.unit_count} units` : "";
+            const power = powerByFactionId[faction.id];
+            const powerBar =
+              power !== undefined
+                ? `<div class="power-bar-track" title="Power ${power.toFixed(1)} (territory + units + resources/10)">
+                     <span class="power-bar-fill" style="width:${((power / maxPower) * 100).toFixed(0)}%;background:${swatch}"></span>
+                   </div>`
+                : "";
             return `<li><span class="swatch" style="background:${swatch}"></span>
               ${escapeHtml(faction.faction_name)} (${escapeHtml(faction.role_preset)}) — ${status}
               ${isWinner ? " 🏆" : ""}
               ${resources ? `<div class="faction-resources">${escapeHtml(resources)} — ${escapeHtml(units)}</div>` : ""}
+              ${powerBar}
               </li>`;
           })
           .join("")}
       </ul>
     `;
+    const reviewButton = this.gameDetailEl.querySelector(".review-this-game-button");
+    if (reviewButton) {
+      reviewButton.addEventListener("click", () => this.onReviewRequested(reviewButton.dataset.gameId));
+    }
     return game;
   }
 

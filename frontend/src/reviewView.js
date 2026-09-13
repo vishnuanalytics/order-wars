@@ -1,13 +1,39 @@
 import { createAnnotation, evaluateGame, getGame, getGameEvents, listGames } from "./api.js";
-import { escapeHtml } from "./utils.js";
+import { escapeHtml, METRIC_GLOSSARY } from "./utils.js";
 
 export class ReviewView {
   constructor() {
     this.gameSelect = document.getElementById("review-game-select");
     this.runButton = document.getElementById("run-evaluation-button");
     this.eventsEl = document.getElementById("review-events");
+    this.summaryEl = document.getElementById("review-summary");
+    this.filtersEl = document.getElementById("review-filters");
+    this.factionFilter = document.getElementById("review-faction-filter");
+    this.lowOnlyCheckbox = document.getElementById("review-low-only");
+    this.glossaryToggle = document.getElementById("metric-glossary-toggle");
+    this.glossaryEl = document.getElementById("metric-glossary");
     this.factionNameById = {};
     this.selectedGameId = null;
+    this._events = []; // the full, unfiltered list for the current game — filters re-render from this, no refetch
+
+    this.factionFilter.addEventListener("change", () => this._renderEventList());
+    this.lowOnlyCheckbox.addEventListener("change", () => this._renderEventList());
+
+    this.glossaryEl.innerHTML = Object.entries(METRIC_GLOSSARY)
+      .map(
+        ([name, info]) =>
+          `<div class="metric-glossary-entry">
+            <strong>${escapeHtml(name)}</strong> <span class="metric-cost">(${escapeHtml(info.cost)})</span>
+            <p>${escapeHtml(info.text)}</p>
+          </div>`
+      )
+      .join("");
+    this.glossaryToggle.addEventListener("click", () => {
+      this.glossaryEl.hidden = !this.glossaryEl.hidden;
+      this.glossaryToggle.textContent = this.glossaryEl.hidden
+        ? "What do these metrics mean?"
+        : "Hide metric explanations";
+    });
 
     this.gameSelect.addEventListener("change", () => this._selectGame(this.gameSelect.value));
     this.runButton.addEventListener("click", () => this._runEvaluation());
@@ -24,16 +50,33 @@ export class ReviewView {
     }
   }
 
+  /** Preselects a game (e.g. from the "Review this game" prompt on a just-
+   * finished game) and loads it, without requiring the user to reopen the
+   * dropdown themselves.
+   */
+  async selectGame(gameId) {
+    await this.refreshGameList();
+    this.gameSelect.value = gameId;
+    await this._selectGame(gameId);
+  }
+
   async _selectGame(gameId) {
     this.selectedGameId = gameId || null;
     this.runButton.disabled = !this.selectedGameId;
     if (!this.selectedGameId) {
       this.eventsEl.innerHTML = "";
+      this.summaryEl.innerHTML = "";
+      this.filtersEl.hidden = true;
       return;
     }
     const game = await getGame(this.selectedGameId);
     this.factionNameById = {};
     for (const faction of game.factions) this.factionNameById[faction.id] = faction.faction_name;
+    this.factionFilter.innerHTML =
+      `<option value="">All factions</option>` +
+      game.factions.map((f) => `<option value="${f.id}">${escapeHtml(f.faction_name)}</option>`).join("");
+    this.factionFilter.value = "";
+    this.lowOnlyCheckbox.checked = false;
     await this._loadEvents();
   }
 
@@ -53,21 +96,129 @@ export class ReviewView {
   }
 
   async _loadEvents() {
-    const events = await getGameEvents(this.selectedGameId);
-    this.eventsEl.innerHTML = events.map((event) => this._renderEvent(event)).join("");
+    this._events = await getGameEvents(this.selectedGameId);
+    this.filtersEl.hidden = this._events.length === 0;
+    this.summaryEl.innerHTML = this._renderSummary(this._events);
+    this._renderEventList();
+  }
+
+  /** Applies the faction/low-score filters to the already-loaded event list
+   * and re-renders — no refetch, so filtering stays instant even on a long
+   * game. Separated from _loadEvents so a filter change doesn't need one.
+   */
+  _renderEventList() {
+    const factionId = this.factionFilter.value;
+    const lowOnly = this.lowOnlyCheckbox.checked;
+    const filtered = this._events.filter((event) => {
+      if (factionId && event.faction_id !== factionId) return false;
+      if (lowOnly && !event.eval_scores.some((s) => !s.success)) return false;
+      return true;
+    });
+
+    this.eventsEl.innerHTML =
+      filtered.map((event) => this._renderEvent(event)).join("") ||
+      `<p class="hint">No decisions match this filter.</p>`;
     this.eventsEl.querySelectorAll(".annotation-form").forEach((form) => {
       form.addEventListener("submit", (event) => this._handleAnnotationSubmit(event, form.dataset.eventId));
     });
   }
 
+  /** An aggregate dashboard above the event list — per-metric pass rate
+   * across the whole game (so "am I improving?" is answerable without
+   * reading every event), plus how much of the game has been annotated
+   * yet, to make annotation feel like measurable progress rather than an
+   * open-ended chore.
+   */
+  _renderSummary(events) {
+    const scoredEvents = events.filter((e) => e.eval_scores.length > 0);
+    if (scoredEvents.length === 0) {
+      return events.length > 0 ? `<p class="hint">Not evaluated yet — run evaluation above.</p>` : "";
+    }
+
+    const byMetric = new Map();
+    for (const event of scoredEvents) {
+      for (const score of event.eval_scores) {
+        if (!byMetric.has(score.metric_name)) byMetric.set(score.metric_name, []);
+        byMetric.get(score.metric_name).push(score.score);
+      }
+    }
+
+    const metricRows = [...byMetric.entries()]
+      .map(([name, scores]) => {
+        const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+        return `<div class="summary-metric">
+          <span class="summary-metric-name">${escapeHtml(name)}</span>
+          <span class="summary-metric-bar"><span class="summary-metric-fill" style="width:${(avg * 100).toFixed(0)}%"></span></span>
+          <span class="summary-metric-value">${(avg * 100).toFixed(0)}%</span>
+        </div>`;
+      })
+      .join("");
+
+    const annotatedCount = events.filter((e) => e.annotations.length > 0).length;
+
+    // Per-faction breakdown is what makes this genuinely useful for
+    // *comparing* role presets (e.g. "did the Warmonger really play less
+    // legally than the Diplomat-Trader?"), not just an overall grade.
+    const metricNames = [...byMetric.keys()];
+    const byFactionMetric = new Map(); // faction_id -> metric_name -> scores[]
+    for (const event of scoredEvents) {
+      if (!event.faction_id) continue;
+      if (!byFactionMetric.has(event.faction_id)) byFactionMetric.set(event.faction_id, new Map());
+      const forFaction = byFactionMetric.get(event.faction_id);
+      for (const score of event.eval_scores) {
+        if (!forFaction.has(score.metric_name)) forFaction.set(score.metric_name, []);
+        forFaction.get(score.metric_name).push(score.score);
+      }
+    }
+    const factionRows = [...byFactionMetric.entries()]
+      .map(([factionId, metrics]) => {
+        const cells = metricNames
+          .map((name) => {
+            const scores = metrics.get(name) || [];
+            if (scores.length === 0) return `<td>—</td>`;
+            const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+            return `<td>${(avg * 100).toFixed(0)}%</td>`;
+          })
+          .join("");
+        return `<tr><th>${escapeHtml(this.factionNameById[factionId] || factionId)}</th>${cells}</tr>`;
+      })
+      .join("");
+
+    const byFactionTable =
+      byFactionMetric.size > 1
+        ? `<table class="summary-by-faction">
+            <thead><tr><th>Faction</th>${metricNames.map((n) => `<th>${escapeHtml(n)}</th>`).join("")}</tr></thead>
+            <tbody>${factionRows}</tbody>
+          </table>`
+        : "";
+
+    return `
+      <div class="review-summary-box">
+        <h3>Game average, by metric</h3>
+        ${metricRows}
+        ${byFactionTable}
+        <p class="summary-annotation-progress">
+          ${annotatedCount} of ${events.length} decisions annotated by you.
+        </p>
+      </div>
+    `;
+  }
+
   _renderEvent(event) {
     const factionName = this.factionNameById[event.faction_id] || event.faction_id || "—";
+    // A passing score's reason is unsurprising, so it stays a hover-only
+    // tooltip; a low score shows its reason inline — that's the moment a
+    // learner actually wants to know *why*, without having to hover.
     const scoresHtml = event.eval_scores
-      .map(
-        (score) =>
+      .map((score) => {
+        const badge =
           `<span class="score-badge ${score.success ? "score-ok" : "score-low"}" ` +
-          `title="${escapeHtml(score.reason || "")}">${escapeHtml(score.metric_name)}: ${score.score.toFixed(2)}</span>`
-      )
+          `title="${escapeHtml(score.reason || "")}">${escapeHtml(score.metric_name)}: ${score.score.toFixed(2)}</span>`;
+        const inlineReason = !score.success && score.reason
+          ? `<span class="score-reason">${escapeHtml(score.reason)}</span>`
+          : "";
+        return badge + inlineReason;
+      })
       .join(" ");
     const annotationsHtml = event.annotations
       .map(

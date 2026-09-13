@@ -39,6 +39,94 @@ body {
   margin: 0;
 }
 
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+#help-tour-button {
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: #fff;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  line-height: 1;
+}
+#help-tour-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tour-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+/* .tour-overlay's own `display: flex` would otherwise beat the browser's
+   default `[hidden] { display: none }` rule at equal specificity (both
+   0,1,0) since this stylesheet loads after the UA one — scoping it to
+   :not([hidden]) keeps toggling the `hidden` attribute authoritative. */
+.tour-overlay:not([hidden]) {
+  display: flex;
+}
+.tour-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1.2rem 1.4rem;
+  max-width: 26rem;
+  width: 90%;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+.tour-progress {
+  margin: 0 0 0.3rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tour-card h3 {
+  margin: 0 0 0.5rem;
+}
+.tour-card p:not(.tour-progress) {
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+.tour-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tour-actions button {
+  padding: 0.35rem 0.7rem;
+  border-radius: 4px;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.tour-skip {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  text-decoration: underline;
+}
+.tour-back {
+  background: #fff;
+  border: 1px solid var(--border);
+  margin-right: 0.4rem;
+}
+.tour-next {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+}
+
 .game-status {
   font-size: 0.85rem;
   padding: 0.2rem 0.6rem;
@@ -235,6 +323,20 @@ form input[type="number"] {
   font-size: 0.75rem;
   color: var(--text-muted);
 }
+.power-bar-track {
+  flex-basis: 100%;
+  margin-left: 1.2rem;
+  height: 0.35rem;
+  width: calc(100% - 1.2rem);
+  background: #e6e6e6;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.power-bar-fill {
+  display: block;
+  height: 100%;
+  opacity: 0.75;
+}
 .swatch {
   display: inline-block;
   width: 0.8rem;
@@ -263,10 +365,165 @@ form input[type="number"] {
   background: #fff3cd;
 }
 
+.game-complete-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  background: #eaf6ff;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.6rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.85rem;
+}
+.review-this-game-button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
 .fatal-error {
   padding: 2rem;
   color: #7a1f27;
   font-family: monospace;
+}
+
+.review-intro {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin: 0.2rem 0 0.5rem;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  text-decoration: underline;
+  cursor: pointer;
+  margin-bottom: 0.5rem;
+}
+
+.metric-glossary {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.78rem;
+}
+.metric-glossary-entry {
+  margin-bottom: 0.4rem;
+}
+.metric-glossary-entry:last-child {
+  margin-bottom: 0;
+}
+.metric-glossary-entry p {
+  margin: 0.1rem 0 0;
+  color: var(--text-muted);
+}
+.metric-cost {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: normal;
+}
+
+.review-summary-box {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  margin-bottom: 0.6rem;
+}
+.review-summary-box h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+}
+.summary-metric {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  margin-bottom: 0.25rem;
+}
+.summary-metric-name {
+  width: 8.5rem;
+  flex-shrink: 0;
+}
+.summary-metric-bar {
+  flex: 1;
+  height: 0.5rem;
+  background: #e6e6e6;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.summary-metric-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.summary-metric-value {
+  width: 2.6rem;
+  text-align: right;
+  flex-shrink: 0;
+}
+.summary-annotation-progress {
+  margin: 0.4rem 0 0;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.summary-by-faction {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.5rem;
+  font-size: 0.74rem;
+}
+.summary-by-faction th,
+.summary-by-faction td {
+  text-align: left;
+  padding: 0.2rem 0.3rem;
+  border-top: 1px solid var(--border);
+}
+.summary-by-faction thead th {
+  border-top: none;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.summary-by-faction tbody th {
+  font-weight: 600;
+}
+
+.review-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.78rem;
+}
+.review-filters select {
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-left: 0.3rem;
+}
+.review-low-only-label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.score-reason {
+  display: block;
+  font-size: 0.74rem;
+  color: #7a1f27;
+  margin: 0.15rem 0 0.15rem 0.1rem;
 }
 
 #review-game-select {

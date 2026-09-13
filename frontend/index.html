@@ -9,7 +9,10 @@
     <div id="app">
       <header class="app-header">
         <h1>Order Wars</h1>
-        <div id="game-status" class="game-status"></div>
+        <div class="app-header-right">
+          <div id="game-status" class="game-status"></div>
+          <button type="button" id="help-tour-button" title="Show the tour again" aria-label="Show the tour again">?</button>
+        </div>
       </header>
 
       <main class="app-main">
@@ -65,6 +68,17 @@
 
           <section id="tab-review" class="tab-panel">
             <h2>Review</h2>
+            <p class="review-intro">
+              Every faction's turn is a decision an AI agent made. Several
+              metrics score it automatically (DeepEval), and you can add your
+              own judgment below each one — that's what "annotation" means
+              here.
+            </p>
+            <button type="button" id="metric-glossary-toggle" class="link-button">
+              What do these metrics mean?
+            </button>
+            <div id="metric-glossary" class="metric-glossary" hidden></div>
+
             <label>
               Game
               <select id="review-game-select"></select>
@@ -72,6 +86,22 @@
             <div class="form-actions">
               <button type="button" id="run-evaluation-button" disabled>Run evaluation</button>
             </div>
+
+            <div id="review-summary" class="review-summary"></div>
+
+            <div id="review-filters" class="review-filters" hidden>
+              <label>
+                Faction
+                <select id="review-faction-filter">
+                  <option value="">All factions</option>
+                </select>
+              </label>
+              <label class="review-low-only-label">
+                <input type="checkbox" id="review-low-only" />
+                Low scores only
+              </label>
+            </div>
+
             <div id="review-events"></div>
           </section>
         </aside>
