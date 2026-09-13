@@ -7,13 +7,14 @@ LLM-free, so it's fully unit-testable without mocking anything (see
 live — `agents/graph.py` calls `resolve_action` rather than mutating state
 itself.
 
-Combat weighs unit-type matchups (COUNTERS/_effective_strength) but is
-still scoped deliberately simple otherwise (see CLAUDE.md "Gameplay depth
-rollout" and `agents/actions.py`): one pooled army per faction (no
-per-province garrisons), one-shot combat on `move_army` into enemy
-territory (no multi-turn sieges), and diplomacy as a plain reciprocal
-handshake (no power-triggered coalition mechanics). Those are later
-gameplay-depth stages, not missing polish.
+Combat weighs unit-type matchups (COUNTERS/_effective_strength) and
+attacking enemy territory is a multi-turn siege (see SIEGE_TURNS_TO_DECIDE),
+but is still scoped deliberately simple otherwise (see CLAUDE.md "Gameplay
+depth rollout" and `agents/actions.py`): one pooled army per faction (no
+per-province garrisons — a siege tracks *who* is attacking *which*
+province, not where either side's units physically sit) and diplomacy as
+a plain reciprocal handshake (no power-triggered coalition mechanics).
+Those are later gameplay-depth stages, not missing polish.
 """
 
 import math
@@ -57,6 +58,18 @@ COUNTER_BONUS = 0.5  # +50% effective strength vs. the type this counters
 
 COMBAT_LOSER_ATTRITION = 0.5  # fraction of units the loser sheds
 COMBAT_WINNER_ATTRITION = 0.1  # fraction of units the winner still sheds
+
+# A move_army into enemy territory at war begins or presses a siege rather
+# than resolving combat immediately. SIEGE_TURNS_TO_DECIDE consecutive
+# presses by the same attacker on the same province (their own turns, not
+# calendar turns) force the decisive battle; pressing a different target,
+# or having anything else happen to the province in between (ownership
+# change, war ending), abandons the siege with no losses to either side.
+SIEGE_TURNS_TO_DECIDE = 2
+
+# Defenders fighting on hills get a home-terrain advantage; open plains and
+# coastal provinces don't (an unrecognized/missing terrain defaults to 0).
+TERRAIN_DEFENSE_BONUS: dict[str, float] = {"hills": 0.3}
 
 
 def pair_key(faction_a: str, faction_b: str) -> str:
@@ -123,9 +136,9 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
     """Apply `action` (already sanitized by the caller) for `faction_id`.
 
     Returns a partial `GameState` update: full replacement values for
-    `factions`, `province_owner`, `diplomatic_status`, and
-    `pending_proposals` (LangGraph has no merge reducer for these dict
-    fields, so a node must return the complete new value, not a patch — see
+    `factions`, `province_owner`, `diplomatic_status`, `pending_proposals`,
+    and `sieges` (LangGraph has no merge reducer for these dict fields, so
+    a node must return the complete new value, not a patch — see
     `agents/state.py`), plus `resolution` (a short human-readable string the
     caller appends to the turn's log line).
     """
@@ -140,7 +153,17 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
     province_owner = dict(state["province_owner"])
     diplomatic_status = dict(state["diplomatic_status"])
     pending_proposals = dict(state["pending_proposals"])
+    sieges = dict(state["sieges"])
     resolution = ""
+
+    # A siege only persists while its attacker keeps pressing that exact
+    # target every one of their own turns — abandon any of this faction's
+    # other in-progress sieges before the action below (possibly) starts
+    # or continues a new one.
+    pressed_target = action.target_province if action.action_type == "move_army" else None
+    for province_id, siege in list(sieges.items()):
+        if siege["attacker_id"] == faction_id and province_id != pressed_target:
+            del sieges[province_id]
 
     if action.action_type == "hold":
         resolution = "held position"
@@ -183,24 +206,42 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         owner = province_owner.get(target_province)
         if owner is None or owner == faction_id:
             province_owner[target_province] = faction_id
+            sieges.pop(target_province, None)  # moot once peacefully held
             resolution = f"moved into {target_province} (now held)"
         elif diplomatic_status_between(state, faction_id, owner) != "war":
+            sieges.pop(target_province, None)  # can't besiege without being at war
             resolution = f"cannot move into {owner}'s {target_province} without being at war"
         else:
-            defender = dict(factions[owner])
-            defender["units"] = dict(defender["units"])
-            attacker_strength = _effective_strength(faction["units"], defender["units"])
-            defender_strength = _effective_strength(defender["units"], faction["units"])
-            if attacker_strength > defender_strength:
-                province_owner[target_province] = faction_id
-                faction["units"] = _attrit(faction["units"], COMBAT_WINNER_ATTRITION)
-                defender["units"] = _attrit(defender["units"], COMBAT_LOSER_ATTRITION)
-                resolution = f"won the battle for {target_province}, captured from {owner}"
+            existing = sieges.get(target_province)
+            already_pressing = existing is not None and existing["attacker_id"] == faction_id
+            progress = existing["progress"] + 1 if already_pressing else 1
+
+            if progress < SIEGE_TURNS_TO_DECIDE:
+                sieges[target_province] = {"attacker_id": faction_id, "progress": progress}
+                resolution = (
+                    f"began a siege of {target_province}" if progress == 1
+                    else f"pressed the siege of {target_province}"
+                )
             else:
-                faction["units"] = _attrit(faction["units"], COMBAT_LOSER_ATTRITION)
-                defender["units"] = _attrit(defender["units"], COMBAT_WINNER_ATTRITION)
-                resolution = f"lost the battle for {target_province} (held by {owner})"
-            factions[owner] = defender
+                defender = dict(factions[owner])
+                defender["units"] = dict(defender["units"])
+                attacker_strength = _effective_strength(faction["units"], defender["units"])
+                defender_strength = _effective_strength(defender["units"], faction["units"])
+                province = get_province(target_province)
+                terrain = province.terrain if province else None
+                defender_strength *= 1 + TERRAIN_DEFENSE_BONUS.get(terrain, 0.0)
+
+                sieges.pop(target_province, None)
+                if attacker_strength > defender_strength:
+                    province_owner[target_province] = faction_id
+                    faction["units"] = _attrit(faction["units"], COMBAT_WINNER_ATTRITION)
+                    defender["units"] = _attrit(defender["units"], COMBAT_LOSER_ATTRITION)
+                    resolution = f"broke the siege of {target_province}, captured from {owner}"
+                else:
+                    faction["units"] = _attrit(faction["units"], COMBAT_LOSER_ATTRITION)
+                    defender["units"] = _attrit(defender["units"], COMBAT_WINNER_ATTRITION)
+                    resolution = f"lost the siege of {target_province} (held by {owner})"
+                factions[owner] = defender
 
     factions[faction_id] = faction
 
@@ -209,5 +250,6 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         "province_owner": province_owner,
         "diplomatic_status": diplomatic_status,
         "pending_proposals": pending_proposals,
+        "sieges": sieges,
         "resolution": resolution,
     }

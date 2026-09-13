@@ -6,13 +6,12 @@ instead of Phase 2's abstract `action_type`/`target_faction` pair. Effects are
 computed by `game/rules.py`, not here — this module only defines the shape an
 LLM call must produce.
 
-Scoped deliberately: no per-province garrisons or siege mechanics (a
-faction's units are one pooled army, and a `move_army` into enemy territory
-is one-shot combat, not a multi-turn siege) — that nuance is a later
-gameplay-depth stage (see CLAUDE.md's "Gameplay depth rollout"). Diplomacy
-is a simple reciprocal handshake (a matching `negotiate` from both sides
-resolves it) rather than the fuller power-triggered coalition mechanics
-also documented as later-stage territory.
+Scoped deliberately: no per-province garrisons (a faction's units are one
+pooled army — a siege tracks who's attacking which province, not where
+either side's units physically sit). Diplomacy is a simple reciprocal
+handshake (a matching `negotiate` from both sides resolves it) rather than
+the fuller power-triggered coalition mechanics documented as a later
+gameplay-depth stage (see CLAUDE.md's "Gameplay depth rollout").
 """
 
 from typing import Literal
@@ -34,8 +33,10 @@ class FactionAction(BaseModel):
             "move_army: send your army into target_province — must be one "
             "of your current territory or adjacent to it. Unclaimed or "
             "your-own territory is captured/reinforced peacefully; enemy "
-            "territory triggers combat and only succeeds if you're at war "
-            "with its owner. build_unit: spend resources to add a unit of "
+            "territory (only if you're at war with its owner) begins or "
+            "presses a siege — the decisive battle only happens once you've "
+            "targeted that same province on consecutive turns of your own. "
+            "build_unit: spend resources to add a unit of "
             "unit_type (defaults to legion if unset). "
             "negotiate: propose (or, if target_faction already proposed the "
             "same thing to you, accept) a truce or alliance with "
@@ -59,5 +60,73 @@ class FactionAction(BaseModel):
             "'legion', 'cavalry', or 'siege_engine'. Defaults to 'legion' "
             "if unset."
         ),
+    )
+    rationale: str = Field(description="One short sentence explaining the choice.")
+
+
+# Narrower per-specialist schemas — see agents/graph.py's `_dispatch_specialist`.
+# Each restricts action_type to only what that specialist actually decides
+# (Pydantic-enforced, not just a prompt request — the same reasoning as
+# UnitType being a closed Literal above), and each converts directly into a
+# FactionAction (its fields are always a subset, with FactionAction's
+# existing defaults covering everything else) — resolve_action/
+# _sanitize_action never see these narrower types, only the FactionAction
+# built from one.
+
+class MilitaryAction(BaseModel):
+    """The military commander's decision: move or hold. Declaring war is a
+    diplomatic act (see DiplomaticAction), not a troop movement."""
+
+    action_type: Literal["move_army", "hold"] = Field(
+        description=(
+            "move_army: send your army into target_province — must be one "
+            "of your current territory or adjacent to it. Unclaimed or "
+            "your-own territory is captured/reinforced peacefully; enemy "
+            "territory (only if already at war with its owner) begins or "
+            "presses a siege. hold: do nothing notable this turn."
+        )
+    )
+    target_province: str | None = Field(
+        default=None, description="Required for move_army: a real province id."
+    )
+    rationale: str = Field(description="One short sentence explaining the choice.")
+
+
+class EconomicAction(BaseModel):
+    """The economic/logistics agent's decision: build or hold."""
+
+    action_type: Literal["build_unit", "hold"] = Field(
+        description=(
+            "build_unit: spend resources to add a unit of unit_type "
+            "(defaults to legion if unset). hold: do nothing notable this turn."
+        )
+    )
+    unit_type: UnitType | None = Field(
+        default=None,
+        description=(
+            "Optional for build_unit: which unit type to build — "
+            "'legion', 'cavalry', or 'siege_engine'. Defaults to 'legion' "
+            "if unset."
+        ),
+    )
+    rationale: str = Field(description="One short sentence explaining the choice.")
+
+
+class DiplomaticAction(BaseModel):
+    """The diplomat/trade agent's decision: negotiate, declare war, or hold."""
+
+    action_type: Literal["negotiate", "declare_war", "hold"] = Field(
+        description=(
+            "negotiate: propose (or, if target_faction already proposed the "
+            "same thing to you, accept) a truce or alliance with "
+            "target_faction. declare_war: unilaterally go to war with "
+            "target_faction. hold: do nothing notable this turn."
+        )
+    )
+    target_faction: str | None = Field(
+        default=None, description="Required for negotiate/declare_war: another faction's id."
+    )
+    proposal: ProposalType | None = Field(
+        default=None, description="Required for negotiate: 'truce' or 'alliance'."
     )
     rationale: str = Field(description="One short sentence explaining the choice.")

@@ -282,13 +282,16 @@ def test_eliminated_faction_reflected_in_get_game(client, monkeypatch):
     LLM always holds (nothing ever gets eliminated), so this test needs its
     own lopsided setup — same pattern as tests/test_run_game.py's.
     """
-    from game.rules import pair_key
+    from game.rules import SIEGE_TURNS_TO_DECIDE, pair_key
 
     def _lopsided_state(faction_configs, max_turns):
         state = graph_module.initial_state_for(faction_configs, max_turns)
         state["factions"]["a"]["units"] = {"legion": 10}
         state["factions"]["b"]["units"] = {"legion": 1}
         state["diplomatic_status"] = {pair_key("a", "b"): "war"}
+        state["sieges"] = {
+            ROME_NEIGHBOR: {"attacker_id": "a", "progress": SIEGE_TURNS_TO_DECIDE - 1}
+        }
         return state
 
     class _AlwaysInvadeLLM:

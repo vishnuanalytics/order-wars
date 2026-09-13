@@ -8,6 +8,7 @@ from agents.actions import UnitType
 from agents.state import FactionState, GameState
 from game.rules import (
     COUNTERS,
+    SIEGE_TURNS_TO_DECIDE,
     UNIT_COSTS,
     diplomatic_status_between,
     pair_key,
@@ -53,6 +54,7 @@ def _state(**overrides) -> GameState:
         "province_owner": {HOME: "rome"},
         "diplomatic_status": {},
         "pending_proposals": {},
+        "sieges": {},
         "log": [],
     }
     base.update(overrides)
@@ -63,6 +65,19 @@ def _action(action_type, **kwargs):
     from agents.actions import FactionAction
 
     return FactionAction(action_type=action_type, rationale="test", **kwargs)
+
+
+def _besiege(state, attacker_id, target_province):
+    """Drive a siege to its decisive battle: SIEGE_TURNS_TO_DECIDE calls to
+    move_army against the same target, returning the final (decisive) call's
+    result. Used by tests that only care about the eventual battle outcome,
+    not the intermediate "began/pressed the siege" turns.
+    """
+    result = None
+    for _ in range(SIEGE_TURNS_TO_DECIDE):
+        result = resolve_action(state, attacker_id, _action("move_army", target_province=target_province))
+        state = {**state, "sieges": result["sieges"], "factions": result["factions"]}
+    return result
 
 
 def test_income_applied_every_turn_regardless_of_action():
@@ -114,7 +129,7 @@ def test_move_army_into_enemy_territory_at_war_stronger_attacker_wins():
             "carthage": _faction("carthage", "Carthage", legions=1),
         },
     )
-    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    result = _besiege(state, "rome", NEIGHBOR)
     assert result["province_owner"][NEIGHBOR] == "rome"
     assert result["factions"]["carthage"]["units"]["legion"] < 1 or result["factions"]["carthage"]["units"]["legion"] == 0
     assert result["factions"]["rome"]["units"]["legion"] < 5  # winner still takes some attrition
@@ -129,9 +144,89 @@ def test_move_army_into_enemy_territory_at_war_weaker_attacker_loses():
             "carthage": _faction("carthage", "Carthage", legions=5),
         },
     )
-    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    result = _besiege(state, "rome", NEIGHBOR)
     assert result["province_owner"][NEIGHBOR] == "carthage"  # attacker failed to capture
     assert result["factions"]["rome"]["units"]["legion"] == 0  # loser attrition
+
+
+def test_first_move_into_enemy_territory_begins_a_siege_without_combat():
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        factions={
+            "rome": _faction("rome", "Rome", legions=5),
+            "carthage": _faction("carthage", "Carthage", legions=1),
+        },
+    )
+    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    assert result["province_owner"][NEIGHBOR] == "carthage"  # not captured yet
+    assert result["factions"]["rome"]["units"]["legion"] == 5  # no attrition yet
+    assert result["factions"]["carthage"]["units"]["legion"] == 1  # untouched
+    assert result["sieges"][NEIGHBOR] == {"attacker_id": "rome", "progress": 1}
+    assert "began a siege" in result["resolution"]
+
+
+def test_pressing_the_same_siege_a_second_turn_resolves_the_battle():
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        factions={
+            "rome": _faction("rome", "Rome", legions=5),
+            "carthage": _faction("carthage", "Carthage", legions=1),
+        },
+        sieges={NEIGHBOR: {"attacker_id": "rome", "progress": 1}},
+    )
+    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    assert result["province_owner"][NEIGHBOR] == "rome"  # decisive battle happened
+    assert NEIGHBOR not in result["sieges"]  # resolved, not left dangling
+    assert "broke the siege" in result["resolution"]
+
+
+def test_attacking_a_different_target_abandons_the_previous_siege():
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        sieges={NEIGHBOR: {"attacker_id": "rome", "progress": 1}},
+    )
+    # Rome reinforces its own HOME instead of pressing the siege on NEIGHBOR.
+    result = resolve_action(state, "rome", _action("move_army", target_province=HOME))
+    assert NEIGHBOR not in result["sieges"]  # abandoned, not preserved for later
+
+    # Pressing NEIGHBOR again afterward restarts at progress 1, not 2 -- the
+    # abandoned siege's progress doesn't carry over.
+    state = {**state, "sieges": result["sieges"]}
+    resumed = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    assert resumed["sieges"][NEIGHBOR] == {"attacker_id": "rome", "progress": 1}
+    assert resumed["province_owner"][NEIGHBOR] == "carthage"  # still not captured
+
+
+def test_a_different_attackers_siege_on_the_same_target_restarts_progress():
+    """Two factions besieging the same province don't stack progress --
+    whoever presses most recently owns the (restarted) siege."""
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        sieges={NEIGHBOR: {"attacker_id": "gaul", "progress": 1}},
+    )
+    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    assert result["sieges"][NEIGHBOR] == {"attacker_id": "rome", "progress": 1}
+
+
+def test_terrain_defense_bonus_can_flip_an_otherwise_losing_defense():
+    """6 attacking legions vs 5 defending legions on hills terrain: without
+    the +30% hills defense bonus the attacker would win outright (6 > 5);
+    with it, the defender's effective strength (5 * 1.3 = 6.5) holds."""
+    hills = "831eebfffffffff"  # Bulgaria 6, terrain=hills
+    state = _state(
+        province_owner={HOME: "rome", hills: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        factions={
+            "rome": _faction("rome", "Rome", legions=6),
+            "carthage": _faction("carthage", "Carthage", legions=5),
+        },
+    )
+    result = _besiege(state, "rome", hills)
+    assert result["province_owner"][hills] == "carthage"  # defender held thanks to terrain
 
 
 def test_unit_type_literal_matches_unit_costs_and_counters():
@@ -160,7 +255,7 @@ def test_cavalry_beats_a_larger_legion_force_via_counter_bonus():
             "carthage": _faction("carthage", "Carthage", units={"legion": 5}),
         },
     )
-    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    result = _besiege(state, "rome", NEIGHBOR)
     assert result["province_owner"][NEIGHBOR] == "rome"
 
 
@@ -173,7 +268,7 @@ def test_siege_engine_beats_a_larger_cavalry_force_via_counter_bonus():
             "carthage": _faction("carthage", "Carthage", units={"cavalry": 5}),
         },
     )
-    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    result = _besiege(state, "rome", NEIGHBOR)
     assert result["province_owner"][NEIGHBOR] == "rome"
 
 
@@ -186,7 +281,7 @@ def test_legion_beats_a_larger_siege_engine_force_via_counter_bonus():
             "carthage": _faction("carthage", "Carthage", units={"siege_engine": 5}),
         },
     )
-    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    result = _besiege(state, "rome", NEIGHBOR)
     assert result["province_owner"][NEIGHBOR] == "rome"
 
 
@@ -201,7 +296,7 @@ def test_same_unit_type_combat_is_unaffected_by_counter_bonus():
             "carthage": _faction("carthage", "Carthage", units={"cavalry": 5}),
         },
     )
-    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    result = _besiege(state, "rome", NEIGHBOR)
     assert result["province_owner"][NEIGHBOR] == "carthage"  # attacker still weaker, no bonus to save it
 
 

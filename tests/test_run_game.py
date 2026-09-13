@@ -82,16 +82,21 @@ def _fake_build_llm(max_tokens: int = 64, schema=None):
 
 def _lopsided_initial_state(faction_configs, max_turns):
     """Same shape as agents.graph.initial_state_for, but with faction "a"
-    strong enough to win a single battle outright and both factions already
-    at war — lets a 2-faction elimination happen in exactly one turn,
-    without needing to script several rounds of fake LLM output.
+    strong enough to win a single battle outright, both factions already at
+    war, and a's siege of ROME_NEIGHBOR already one turn in — lets a
+    2-faction elimination happen on "a"'s very next move_army (the decisive
+    battle, per game.rules.SIEGE_TURNS_TO_DECIDE), without needing to
+    script several rounds of fake LLM output.
     """
-    from game.rules import pair_key
+    from game.rules import SIEGE_TURNS_TO_DECIDE, pair_key
 
     state = graph_module.initial_state_for(faction_configs, max_turns)
     state["factions"]["a"]["units"] = {"legion": 10}
     state["factions"]["b"]["units"] = {"legion": 1}
     state["diplomatic_status"] = {pair_key("a", "b"): "war"}
+    state["sieges"] = {
+        ROME_NEIGHBOR: {"attacker_id": "a", "progress": SIEGE_TURNS_TO_DECIDE - 1}
+    }
     return state
 
 
@@ -124,7 +129,7 @@ def test_run_game_persists_the_winning_event(sqlite_sessionmaker):
         assert len(events) == 1
         assert events[0].event_type == "move_army"
         assert events[0].payload["target_province"] == ROME_NEIGHBOR
-        assert "won the battle" in events[0].payload["resolution"]
+        assert "broke the siege" in events[0].payload["resolution"]
 
 
 def test_run_game_records_the_starting_diplomatic_status_once(sqlite_sessionmaker):
@@ -319,7 +324,7 @@ def test_run_game_from_scenario_id(sqlite_sessionmaker, monkeypatch):
         scenario_id = scenario.id
 
     def _lopsided_from_scenario(faction_configs, max_turns):
-        from game.rules import pair_key
+        from game.rules import SIEGE_TURNS_TO_DECIDE, pair_key
 
         state = graph_module.initial_state_for(faction_configs, max_turns)
         strong_id = next(c["faction_id"] for c in faction_configs if c["name"] == "Strong")
@@ -327,6 +332,9 @@ def test_run_game_from_scenario_id(sqlite_sessionmaker, monkeypatch):
         state["factions"][strong_id]["units"] = {"legion": 10}
         state["factions"][weak_id]["units"] = {"legion": 1}
         state["diplomatic_status"] = {pair_key(strong_id, weak_id): "war"}
+        state["sieges"] = {
+            ROME_NEIGHBOR: {"attacker_id": strong_id, "progress": SIEGE_TURNS_TO_DECIDE - 1}
+        }
         return state
 
     monkeypatch.setattr(run_game_module, "initial_state_for", _lopsided_from_scenario)

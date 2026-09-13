@@ -19,29 +19,47 @@ it stays maintainable as it grows.
 
 ## Agent & simulation design
 
-Decisions below shape Phases 2, 4, and 5. They're forward-looking design
-intent, not yet built (see "Progress log") — but new work in those phases
-should build toward this shape rather than a simpler one that needs
-retrofitting later.
+Most decisions below shaped Phases 2, 4, and 5 as forward-looking design
+intent at the time this section was written; the hierarchical-agents bullet
+is now built (see "Progress log" for the multi-level agent hierarchy entry)
+— new work should build toward the shape described here rather than a
+simpler one that needs retrofitting later.
 
 - **N factions, not two.** `GameState` and the graph must be built to scale to
   an arbitrary, user-configured number of factions, not hardcoded to a pair.
   Phase 2's "two+ agents" should be implemented as N from the start — cheap
   now, expensive to retrofit later.
-- **Hierarchical agents per faction, not one monolithic decision-maker.** Each
-  faction is composed of role-specialized agents rather than a single LLM call
-  deciding everything:
-  - **Strategic leader** — sets intent (expand north, seek peace with X) every
-    few turns, not every tick.
-  - **Military commander** — tactical unit orders each tick, constrained by
-    current leader intent.
-  - **Diplomat/trade agent** — negotiates directly with other factions'
-    diplomat agents (agent-to-agent, not narrator-mediated).
-  - **Economic/logistics agent** — resource allocation, production.
+- **Hierarchical agents per faction, not one monolithic decision-maker.**
+  Built as: a **strategic leader** (`agents/graph.py`'s `_refresh_intent`)
+  sets intent every few turns, not every tick, and a rule-based
+  **dispatcher** (`_dispatch_specialist`, no LLM call) routes each turn's
+  actual decision to one of three specialists executing that intent — a
+  **military commander** (troop movement/sieges), a **diplomat/trade
+  agent** (negotiation, war), and an **economic/logistics agent** (resource
+  allocation, production) — rather than a single LLM call deciding
+  everything. Each specialist has its own Pydantic schema restricting it to
+  only its own domain's actions (`agents/actions.py`'s `MilitaryAction`/
+  `DiplomaticAction`/`EconomicAction`), not just a prompt-level request.
 
-  This is a planner/executor split: intent changes rarely, execution happens
-  every tick within that intent, and re-planning is event-driven (triggered by
-  a deviation from expected state) rather than redone from scratch each turn.
+  Two deliberate simplifications from the fuller vision, chosen when this
+  was built (session cost/complexity tradeoff, not a technical limit): (1)
+  **one dispatched decision per turn, not three parallel ones** — the
+  dispatcher picks a single specialist to act (prioritizing an in-progress
+  siege, then an incoming proposal, then a role-preset-ordered rotation —
+  see `agents/roles.py`'s `ROLE_PRESET_SPECIALIST_ORDER`), so LLM call
+  volume per turn is unchanged from the single-executor version, not
+  tripled; (2) **diplomat agents still negotiate via the existing
+  structured propose/accept `negotiate` action**, not live multi-message
+  agent-to-agent dialogue — "agent-to-agent, not narrator-mediated" below
+  is satisfied in the sense that the diplomat specialist (not a general
+  executor) originates the action, but not in the sense of a back-and-forth
+  conversation.
+
+  This is still a planner/executor split: intent changes rarely, execution
+  happens every turn within that intent. Re-planning is not yet
+  event-driven (`_refresh_intent`'s cadence is still a fixed interval, not
+  triggered by a deviation from expected state) — that refinement wasn't
+  part of this pass, only the specialist split was.
 - **Actions are structured tool calls, not free text.** Decision nodes must
   call schema-validated tools (e.g. `move_army`, `propose_trade`,
   `build_unit`) that mutate `GameState` directly, rather than emitting a
@@ -887,10 +905,141 @@ predicted.
   a type breakdown — showing composition would need a new DB column/
   migration, which nothing in this stage's scope actually requires yet.
 
-Stages 4–11 will each get their own short validation pass against the real
-code before implementation (the same way stages 1-3 needed real data/code
+### Stage 4 — multi-turn sieges + terrain defense bonus (done)
+
+- `agents/state.py`: new `GameState.sieges: dict[str, dict]` field — maps a
+  besieged province id to `{"attacker_id": str, "progress": int}`.
+  Deliberately ephemeral operational state alongside `province_owner`
+  (never duplicates ownership), following the exact pattern already
+  established by `pending_proposals`/`last_event` — no per-province
+  garrisons added, since a siege tracks *who* is attacking *which*
+  province, not where either side's pooled army physically sits.
+- `game/rules.py`: `move_army` into enemy territory at war no longer
+  resolves combat immediately. `SIEGE_TURNS_TO_DECIDE = 2` — the first
+  `move_army` against a given enemy province begins a siege (progress 1,
+  no combat, no attrition); the *same attacker* targeting the *same
+  province* on their very next own turn presses it to progress 2, which
+  triggers the decisive battle (reusing Stage 3's `_effective_strength`
+  unchanged, exactly as the roadmap intended). Any of an attacker's
+  in-progress sieges not being actively pressed this turn are abandoned
+  with no losses to either side — pressing a different target, moving
+  peacefully, or the war ending all lapse it. A different faction pressing
+  an already-sieged province simply restarts progress at 1 under the new
+  attacker's name (sieges don't stack across attackers; whoever pressed
+  most recently owns the active one).
+- `TERRAIN_DEFENSE_BONUS = {"hills": 0.3}` — the decisive battle multiplies
+  the defender's effective strength by `1 + bonus` for their province's
+  terrain (coastal/plains get none). Verified with a test where a
+  numerically stronger attacker (6 vs 5) loses specifically *because* of
+  the hills bonus (5 × 1.3 = 6.5 > 6) — not just "defender can win."
+- `agents/graph.py`'s executor prompt gained a one-line explanation of the
+  siege mechanic plus `_siege_summary()` (which of *this* faction's sieges
+  are in progress and at what count), derived from live state — an agent
+  needs to know it must press the same target again, or its first attack
+  will look like it silently failed.
+- `agents/actions.py`'s docstring/field description updated to describe
+  sieges instead of the old "one-shot combat" simplification note.
+- **Real, expected ripple through existing tests, not a sign of a design
+  problem**: every test that depended on one-shot combat (Phase 4's
+  original stronger/weaker-attacker tests, all four of Stage 3's RPS
+  tests, and three "wins in exactly one action" fixtures in
+  `test_run_game.py`/`test_backend.py`) needed updating — either via a new
+  `_besiege()` test helper that drives a siege to its decisive call, or by
+  pre-seeding `state["sieges"]` at `progress = SIEGE_TURNS_TO_DECIDE - 1`
+  so a scripted fake-LLM test still resolves in exactly one real action.
+  This is the *combat calculation code* being reused unchanged (per the
+  roadmap's promise), not the tests — the roadmap never promised existing
+  tests would survive untouched when a stage's whole point is changing
+  when a decisive battle happens.
+- No DB/migration changes: the new `sieges` state is transient
+  (GameState-only) — the human-readable resolution string ("began a siege
+  of X" / "pressed the siege of X" / "broke the siege of X, captured from
+  Y" / "lost the siege of X") already flows into `GameEvent.payload`
+  through the existing pass-through mechanism with zero `run_game.py`
+  changes, and the frontend's event log already displays `resolution`
+  verbatim — sufficient to narrate what happened without a new column.
+- No live LLM calls needed: 112/112 tests pass, all mocked/direct.
+
+Stages 5–11 will each get their own short validation pass against the real
+code before implementation (the same way stages 1-4 needed real data/code
 to calibrate correctly, not just up-front assumptions), landing as their
 own commits in this same order.
+
+## Multi-level agent hierarchy (done, separate from the gameplay-depth
+## rollout above — an agent-architecture change, not a game mechanic)
+
+Realizes the "Hierarchical agents per faction" bullet in "Agent &
+simulation design" above, which had stood as forward-looking intent since
+Phase 2 (there wasn't yet distinct territory/resource/diplomacy state for
+separate specialists to act on independently — the gameplay-depth stages
+changed that). Before designing anything, asked the user two clarifying
+questions given they'd just exhausted a day's LLM quota on one game:
+one dispatched decision/turn vs. three parallel specialist calls/turn
+(chose dispatched — no LLM call increase), and live agent-to-agent
+negotiation dialogue vs. keeping the existing structured propose/accept
+`negotiate` action (chose to keep it). Both choices are documented as
+deliberate simplifications in "Agent & simulation design" above, not
+silently dropped scope.
+
+- `agents/actions.py`: added `MilitaryAction` (`move_army`/`hold`),
+  `EconomicAction` (`build_unit`/`hold`), `DiplomaticAction`
+  (`negotiate`/`declare_war`/`hold`) — each a genuinely narrower Pydantic
+  schema (not just a prompt-level restriction) mirroring the relevant
+  slice of `FactionAction`'s fields. `FactionAction` itself, along with
+  `_sanitize_action` and `game.rules.resolve_action`, is completely
+  unchanged — a specialist's result converts directly into a
+  `FactionAction` (`FactionAction(**result.model_dump())`) since its
+  fields are always a subset with `FactionAction`'s own defaults covering
+  the rest.
+- `agents/graph.py`: `_dispatch_specialist(state, faction_id)` — pure,
+  no LLM call — picks which specialist decides this turn, in priority
+  order: (1) an active siege this faction is pressing always routes to
+  military, since a siege lapses if not pressed every one of the
+  attacker's own turns (Stage 4) and leaving that to chance would make
+  sieges nearly impossible to complete; (2) an incoming pending proposal
+  routes to diplomatic, so offers get answered instead of going stale;
+  (3) otherwise a role-preset-ordered rotation
+  (`agents.roles.specialist_order`). `_decide_action` now builds one of
+  three focused, domain-specific prompts (military doesn't see unit costs,
+  economic doesn't see move targets, diplomat doesn't see either) instead
+  of one prompt covering everything — each narrower than the old
+  monolithic prompt/schema, so `_ACTION_MAX_TOKENS` (900, carried over
+  unchanged) has more headroom per call than before, not less; not
+  re-tuned down without live data confirming it's safe to.
+- `agents/roles.py`: `ROLE_PRESET_SPECIALIST_ORDER` — a fixed permutation
+  of all three domains per role preset (e.g. `warmonger: ["military",
+  "diplomatic", "economic"]`, `isolationist: ["economic", "military",
+  "diplomatic"]`) — always includes every domain at least once every 3
+  turns, so no faction is ever permanently locked out of expansion/
+  economy/diplomacy; only the *priority order* differs by preset. Extends
+  the existing "role preset shapes behavior" pattern from prompt tone
+  alone to actual action-domain frequency.
+- `last_event` (and therefore `GameEvent.payload`, via the existing
+  generic pass-through — zero `run_game.py` changes) gained a
+  `"specialist"` key recording which domain decided the turn.
+  `frontend/src/gameView.js`'s event log shows it (e.g. `Turn 3 — Rome
+  [military]: move_army ...`), so the architecture is visible when
+  watching a game, not just inferable from resolution text.
+- **Real, expected ripple, not a sign of a design problem** (same
+  precedent as Stage 4's siege-timing change): the log-line format
+  assertion in two `test_graph.py` tests needed updating for the new
+  `[specialist]` tag, and the shared fake-LLM test helper needed to become
+  schema-aware (return an instance of whichever specialist schema
+  `build_llm` was actually bound to, not a hardcoded `FactionAction` —
+  otherwise a real dispatch/schema mismatch could pass silently). Existing
+  intent-refresh/sanitization tests get `_dispatch_specialist` monkeypatched
+  to a fixed domain so they stay focused on what they originally tested
+  rather than getting coupled to the rotation formula.
+- New direct tests for `_dispatch_specialist` (siege override, proposal
+  override — including that an *outgoing* proposal correctly does **not**
+  trigger it, only an incoming one — role-preset rotation, unknown-role
+  fallback) and for `_decide_action`'s schema-to-domain wiring. 118/118
+  tests pass, all mocked/direct — no live LLM calls needed to build or
+  verify this (pure prompt/schema/dispatch logic).
+- Not yet live-verified: the three new prompts/schemas parsing cleanly
+  against a real model (Groq/OpenRouter/Anthropic) hasn't been checked
+  this session — flagged for whenever LLM quota is confirmed available,
+  not assumed safe just because the mocked tests pass.
 
 ## Non-goals
 

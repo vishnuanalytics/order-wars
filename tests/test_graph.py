@@ -1,8 +1,14 @@
 from langgraph.graph import END
 
 from agents import graph as graph_module
-from agents.actions import FactionAction
-from agents.graph import _sanitize_action, build_graph, faction_turn, route_after_turn
+from agents.actions import DiplomaticAction, EconomicAction, FactionAction, MilitaryAction
+from agents.graph import (
+    _dispatch_specialist,
+    _sanitize_action,
+    build_graph,
+    faction_turn,
+    route_after_turn,
+)
 from agents.state import FactionState, GameState
 
 ROME_HOME = "831e80fffffffff"  # Italy 20
@@ -34,6 +40,7 @@ def _state(factions: dict[str, FactionState], province_owner: dict[str, str], **
         "province_owner": province_owner,
         "diplomatic_status": {},
         "pending_proposals": {},
+        "sieges": {},
         "last_event": None,
         "log": [],
     }
@@ -56,25 +63,39 @@ class _FakeIntentLLM:
         return _FakeIntentResponse("expand toward the coast")
 
 
-class _FakeActionLLM:
-    """Stands in for the executor-layer structured-output call. Always
-    proposes moving into ROME_NEIGHBOR — legal for Rome, illegal for
-    Carthage, which is what the sanitization tests below rely on.
+class _FakeSpecialistLLM:
+    """Stands in for a specialist's structured-output call, returning an
+    instance of whichever schema `build_llm` was actually bound to — a real
+    specialist call only ever gets back an instance of the schema it was
+    given, so a schema-blind fake could mask a dispatch/schema mismatch.
+    Always proposes moving into ROME_NEIGHBOR for MilitaryAction — legal for
+    Rome, illegal for Carthage, which is what the sanitization test below
+    relies on; a harmless hold for the other two schemas.
     """
 
-    def __init__(self, *args, **kwargs):
-        pass
+    def __init__(self, schema, *args, **kwargs):
+        self._schema = schema
 
-    def invoke(self, prompt: str) -> FactionAction:
-        return FactionAction(action_type="move_army", target_province=ROME_NEIGHBOR, rationale="testing")
+    def invoke(self, prompt: str):
+        if self._schema is MilitaryAction:
+            return MilitaryAction(action_type="move_army", target_province=ROME_NEIGHBOR, rationale="testing")
+        return self._schema(action_type="hold", rationale="testing")
 
 
 def _fake_build_llm(max_tokens: int = 64, schema=None):
-    return _FakeActionLLM() if schema is not None else _FakeIntentLLM()
+    return _FakeIntentLLM() if schema is None else _FakeSpecialistLLM(schema)
+
+
+def _force_specialist(monkeypatch, domain: str) -> None:
+    """Pin _dispatch_specialist to a fixed domain, decoupling a test from
+    the role-preset rotation formula when the test is really about
+    something else (intent refresh, sanitization)."""
+    monkeypatch.setattr(graph_module, "_dispatch_specialist", lambda state, faction_id: domain)
 
 
 def test_faction_turn_refreshes_intent_and_applies_legal_action(monkeypatch):
     monkeypatch.setattr(graph_module, "build_llm", _fake_build_llm)
+    _force_specialist(monkeypatch, "military")
     state = _state(
         {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
         {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
@@ -88,11 +109,12 @@ def test_faction_turn_refreshes_intent_and_applies_legal_action(monkeypatch):
     assert rome["intent"] == "expand toward the coast"
     assert rome["last_action"]["action_type"] == "move_army"
     assert update["province_owner"][ROME_NEIGHBOR] == "rome"  # legal move, captured
-    assert "Turn 1 — Rome (move_army)" in update["log"][0]
+    assert "Turn 1 — Rome [military] (move_army)" in update["log"][0]
 
 
 def test_faction_turn_sanitizes_illegal_move_to_hold(monkeypatch):
     monkeypatch.setattr(graph_module, "build_llm", _fake_build_llm)
+    _force_specialist(monkeypatch, "military")
     # Carthage's home isn't adjacent to ROME_NEIGHBOR, so the fake LLM's
     # proposed move is illegal for Carthage and must be sanitized to hold.
     state = _state(
@@ -120,6 +142,71 @@ def test_sanitize_action_allows_a_known_unit_type():
 
     assert sanitized.action_type == "build_unit"
     assert sanitized.unit_type == "cavalry"
+
+
+def test_dispatch_specialist_prioritizes_a_siege_in_progress():
+    """A siege lapses if not pressed every one of the attacker's own turns
+    (Stage 4) -- the dispatcher must never let the rotation override this."""
+    state = _state(
+        {"rome": _faction("rome", "Rome", role_preset="diplomat_trader")},
+        {ROME_HOME: "rome"},
+        sieges={ROME_NEIGHBOR: {"attacker_id": "rome", "progress": 1}},
+        turn=1,  # would otherwise rotate away from military for this role
+    )
+    assert _dispatch_specialist(state, "rome") == "military"
+
+
+def test_dispatch_specialist_prioritizes_an_incoming_proposal():
+    state = _state(
+        {"rome": _faction("rome", "Rome", role_preset="warmonger")},
+        {ROME_HOME: "rome"},
+        pending_proposals={"carthage->rome": "truce"},
+        turn=0,  # warmonger's round-1 rotation slot is "military", not diplomatic
+    )
+    assert _dispatch_specialist(state, "rome") == "diplomatic"
+
+
+def test_dispatch_specialist_ignores_another_factions_pending_proposal():
+    state = _state(
+        {"rome": _faction("rome", "Rome", role_preset="warmonger")},
+        {ROME_HOME: "rome"},
+        pending_proposals={"rome->carthage": "truce"},  # outgoing, not incoming
+        turn=0,
+    )
+    assert _dispatch_specialist(state, "rome") == "military"
+
+
+def test_dispatch_specialist_rotates_through_the_role_presets_full_order():
+    state = _state({"rome": _faction("rome", "Rome", role_preset="isolationist")}, {ROME_HOME: "rome"})
+    # isolationist's order is ["economic", "military", "diplomatic"].
+    domains = []
+    for turn in range(3):
+        domains.append(_dispatch_specialist({**state, "turn": turn}, "rome"))
+    assert domains == ["economic", "military", "diplomatic"]
+
+
+def test_dispatch_specialist_falls_back_to_custom_order_for_an_unknown_role():
+    state = _state({"rome": _faction("rome", "Rome", role_preset="something_new")}, {ROME_HOME: "rome"})
+    assert _dispatch_specialist(state, "rome") == "military"  # custom's round-1 slot
+
+
+def test_decide_action_converts_each_specialist_schema_to_a_faction_action(monkeypatch):
+    monkeypatch.setattr(graph_module, "build_llm", _fake_build_llm)
+    state = _state(
+        {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+    )
+
+    for domain, expected_action_type in [
+        ("military", "move_army"),
+        ("economic", "hold"),
+        ("diplomatic", "hold"),
+    ]:
+        _force_specialist(monkeypatch, domain)
+        action, chosen = graph_module._decide_action(state, "rome", move_targets=[ROME_NEIGHBOR])
+        assert chosen == domain
+        assert isinstance(action, FactionAction)
+        assert action.action_type == expected_action_type
 
 
 def test_faction_turn_skips_intent_refresh_when_not_due(monkeypatch):

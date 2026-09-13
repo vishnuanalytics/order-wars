@@ -1,8 +1,13 @@
 """Phase 4: N-faction turn-taking, grounded in the real map.
 
-Builds on Phase 2's structure (one reusable `faction_turn` node, a two-layer
-intent/executor hierarchy) but the executor now chooses from real,
-currently-legal options — its own territory and adjacent provinces (from
+Builds on Phase 2's structure (one reusable `faction_turn` node) with a
+three-layer hierarchy per faction (see CLAUDE.md "Agent & simulation
+design"): a strategic leader (`_refresh_intent`, refreshed every few turns)
+sets intent, `_dispatch_specialist` picks which of three specialists —
+military commander, economic/logistics agent, diplomat/trade agent — acts
+on it this turn (one LLM call/turn, not three; a deliberate scope choice,
+see CLAUDE.md), and that specialist chooses from real, currently-legal
+options — its own territory and adjacent provinces (from
 `map_data/provinces.geojson`), the other factions actually in play, and any
 diplomatic proposals pending against it — rather than free-floating
 `target_faction` strings. The LLM's raw output is still sanitized before use
@@ -17,11 +22,18 @@ from typing import Literal
 from dotenv import load_dotenv
 from langgraph.graph import END, StateGraph
 
-from agents.actions import FactionAction
+from agents.actions import DiplomaticAction, EconomicAction, FactionAction, MilitaryAction
 from agents.llm import build_llm
-from agents.roles import describe
+from agents.roles import describe, specialist_order
 from agents.state import FactionState, GameState
-from game.rules import COUNTERS, UNIT_COSTS, diplomatic_status_between, resolve_action, territory_of
+from game.rules import (
+    COUNTERS,
+    SIEGE_TURNS_TO_DECIDE,
+    UNIT_COSTS,
+    diplomatic_status_between,
+    resolve_action,
+    territory_of,
+)
 from map_data.loader import get_province, name_of, neighbors_of, sea_neighbors_of
 
 INTENT_REFRESH_INTERVAL = 3
@@ -57,6 +69,15 @@ def _unit_options_summary() -> str:
     return "; ".join(parts)
 
 
+def _siege_summary(state: GameState, faction_id: str) -> str:
+    own = [
+        f"{pid} ({name_of(pid)}, progress {siege['progress']}/{SIEGE_TURNS_TO_DECIDE})"
+        for pid, siege in state["sieges"].items()
+        if siege["attacker_id"] == faction_id
+    ]
+    return "; ".join(own) if own else "none"
+
+
 def _diplomacy_summary(state: GameState, faction_id: str) -> str:
     lines = []
     for other_id in _other_faction_ids(state, faction_id):
@@ -86,43 +107,138 @@ def _refresh_intent(faction: FactionState, other_names: list[str]) -> str:
     return response.content if isinstance(response.content, str) else str(response.content)
 
 
-def _decide_action(
-    state: GameState, faction_id: str, move_targets: list[str]
-) -> FactionAction:
+def _dispatch_specialist(state: GameState, faction_id: str) -> str:
+    """Which specialist — "military", "economic", or "diplomatic" — decides
+    this faction's action this turn. Pure and LLM-free (a rule-based
+    dispatcher, not a fourth LLM call — see CLAUDE.md "Agent & simulation
+    design" for why one dispatched decision/turn, not three parallel ones).
+
+    Real state signals override the role-preset-ordered rotation fallback,
+    so pressing sieges and answering proposals aren't left to chance:
+    1. An active siege this faction is pressing must be pressed again every
+       one of its own turns or it lapses (game.rules.SIEGE_TURNS_TO_DECIDE)
+       — always route to military to protect that investment.
+    2. An incoming pending proposal deserves a timely response, not one
+       that depends on the rotation happening to land on diplomatic.
+    3. Otherwise, rotate through this faction's role-preset-ordered
+       priorities (agents.roles.specialist_order) by round number — a full
+       permutation of all three domains, so no faction is ever permanently
+       locked out of expansion/economy/diplomacy.
+    """
+    if any(siege["attacker_id"] == faction_id for siege in state["sieges"].values()):
+        return "military"
+    if any(key.endswith(f"->{faction_id}") for key in state["pending_proposals"]):
+        return "diplomatic"
+
+    role_preset = state["factions"][faction_id]["role_preset"]
+    order = specialist_order(role_preset)
+    round_number = state["turn"] + 1
+    return order[(round_number - 1) % len(order)]
+
+
+def _specialist_preamble(faction: FactionState, faction_id: str) -> str:
+    return (
+        f"You lead the faction '{faction['name']}' ({faction_id}) in a "
+        f"strategy game. {describe(faction['role_preset'])}\n"
+        f"Your current strategic intent: {faction['intent']}\n"
+    )
+
+
+def _military_prompt(state: GameState, faction_id: str, move_targets: list[str]) -> str:
     faction = state["factions"][faction_id]
     owned = territory_of(state, faction_id)
     move_options = ", ".join(
         f"{pid} ({name_of(pid)}, {get_province(pid).terrain})" for pid in move_targets
     ) or "none"
-
-    # Structured output goes out as a tool call, whose JSON args get cut off
-    # mid-generation if hidden reasoning eats too much of a small budget
-    # (confirmed live against Groq: a 200-token budget truncated the tool
-    # call and failed to parse) — same cause as the note in _refresh_intent.
-    # 600 was enough for Groq but not for the OpenRouter fallback model
-    # (nvidia/nemotron-3-super-120b-a12b:free spent 135 tokens on hidden
-    # reasoning and still ran out mid-schema at 600 — confirmed live via
-    # openai.LengthFinishReasonError); 900 has margin for both.
-    llm = build_llm(max_tokens=900, schema=FactionAction)
-    prompt = (
-        f"You lead the faction '{faction['name']}' ({faction_id}) in a "
-        f"strategy game. {describe(faction['role_preset'])}\n"
-        f"Your current strategic intent: {faction['intent']}\n"
+    return (
+        _specialist_preamble(faction, faction_id)
+        + "You are the military commander: choose this turn's troop "
+        "movement, executing the leader's intent tactically.\n"
         f"Your territory ({len(owned)} provinces): "
         f"{', '.join(name_of(p) for p in owned) or 'none'}\n"
+        f"Your units: {faction['units']}.\n"
+        f"Provinces you may move_army into this turn (own or adjacent, with "
+        f"terrain): {move_options}\n"
+        "Attacking enemy territory is a siege, not instant combat: "
+        f"move_army into the same enemy province {SIEGE_TURNS_TO_DECIDE} of "
+        "your own turns in a row to force the decisive battle. Attacking "
+        "anywhere else in between abandons the siege with no losses.\n"
+        f"Sieges you're actively pressing (press the same target again to "
+        f"continue it): {_siege_summary(state, faction_id)}\n"
+        "Choose this turn's action. For move_army, target_province must be "
+        "one of the listed province ids."
+    )
+
+
+def _economic_prompt(state: GameState, faction_id: str) -> str:
+    faction = state["factions"][faction_id]
+    return (
+        _specialist_preamble(faction, faction_id)
+        + "You are the economic/logistics agent: manage resources and "
+        "production, executing the leader's intent tactically.\n"
         f"Your resources: {faction['resources']}. Your units: {faction['units']}.\n"
         "Each province you hold yields a resource every turn based on its "
         "terrain: coastal -> gold, plains -> grain, hills -> iron.\n"
         f"To build_unit, choose unit_type: {_unit_options_summary()}. "
         "Defaults to legion if unset.\n"
-        f"Provinces you may move_army into this turn (own or adjacent, with "
-        f"terrain): {move_options}\n"
-        f"Other factions and your relations with them: {_diplomacy_summary(state, faction_id)}\n"
-        "Choose this turn's action. For move_army, target_province must be "
-        "one of the listed province ids. For negotiate/declare_war, "
-        "target_faction must be one of the other factions' ids listed above."
+        "Choose this turn's action."
     )
-    return llm.invoke(prompt)
+
+
+def _diplomatic_prompt(state: GameState, faction_id: str) -> str:
+    faction = state["factions"][faction_id]
+    other_ids = _other_faction_ids(state, faction_id)
+    return (
+        _specialist_preamble(faction, faction_id)
+        + "You are the diplomat/trade agent: manage external relations, "
+        "executing the leader's intent tactically.\n"
+        f"Other factions and your relations with them: {_diplomacy_summary(state, faction_id)}\n"
+        "Choose this turn's action. For negotiate/declare_war, "
+        f"target_faction must be one of: {', '.join(other_ids) or 'none'}."
+    )
+
+
+# Structured output goes out as a tool call, whose JSON args get cut off
+# mid-generation if hidden reasoning eats too much of a small budget
+# (confirmed live against Groq: a 200-token budget truncated the tool call
+# and failed to parse) — same cause as the note in _refresh_intent. 600 was
+# enough for Groq but not for the OpenRouter fallback model
+# (nvidia/nemotron-3-super-120b-a12b:free spent 135 tokens on hidden
+# reasoning and still ran out mid-schema at 600 — confirmed live via
+# openai.LengthFinishReasonError); 900 has margin for both. Each specialist
+# schema below has fewer fields than the old monolithic FactionAction did,
+# so 900 stays a safe (if generous) budget for all three — not re-tuned
+# down without live data confirming it's safe to.
+_ACTION_MAX_TOKENS = 900
+
+_SPECIALIST_SCHEMAS = {
+    "military": MilitaryAction,
+    "economic": EconomicAction,
+    "diplomatic": DiplomaticAction,
+}
+
+
+def _decide_action(
+    state: GameState, faction_id: str, move_targets: list[str]
+) -> tuple[FactionAction, str]:
+    """Returns (action, domain) — the caller (faction_turn) records domain
+    on last_event purely for observability (which specialist decided this
+    turn), not because resolve_action/_sanitize_action need it."""
+    domain = _dispatch_specialist(state, faction_id)
+    llm = build_llm(max_tokens=_ACTION_MAX_TOKENS, schema=_SPECIALIST_SCHEMAS[domain])
+
+    if domain == "military":
+        prompt = _military_prompt(state, faction_id, move_targets)
+    elif domain == "economic":
+        prompt = _economic_prompt(state, faction_id)
+    else:
+        prompt = _diplomatic_prompt(state, faction_id)
+
+    result = llm.invoke(prompt)
+    # Each specialist schema's fields are always a subset of FactionAction's,
+    # with FactionAction's own defaults covering the rest — _sanitize_action
+    # and game.rules.resolve_action only ever see this common type.
+    return FactionAction(**result.model_dump()), domain
 
 
 def _sanitize_action(
@@ -167,7 +283,7 @@ def faction_turn(state: GameState) -> dict:
     state = {**state, "factions": {**state["factions"], faction_id: faction}}
 
     move_targets = _legal_move_targets(state, faction_id)
-    action = _decide_action(state, faction_id, move_targets)
+    action, specialist = _decide_action(state, faction_id, move_targets)
     action = _sanitize_action(state, faction_id, action, move_targets)
 
     resolved = resolve_action(state, faction_id, action)
@@ -180,12 +296,13 @@ def faction_turn(state: GameState) -> dict:
     next_turn = state["turn"] + 1 if next_idx == 0 else state["turn"]
 
     log_line = (
-        f"Turn {round_number} — {faction['name']} ({action.action_type}): "
+        f"Turn {round_number} — {faction['name']} [{specialist}] ({action.action_type}): "
         f"{resolved['resolution']} — {action.rationale}"
     )
     last_event = {
         "turn": round_number,
         "faction_id": faction_id,
+        "specialist": specialist,
         **action.model_dump(),
         "resolution": resolved["resolution"],
     }
@@ -195,6 +312,7 @@ def faction_turn(state: GameState) -> dict:
         "province_owner": resolved["province_owner"],
         "diplomatic_status": resolved["diplomatic_status"],
         "pending_proposals": resolved["pending_proposals"],
+        "sieges": resolved["sieges"],
         "active_faction_idx": next_idx,
         "turn": next_turn,
         "last_event": last_event,
@@ -276,6 +394,7 @@ def initial_state_for(faction_configs: list[dict], max_turns: int) -> GameState:
         "province_owner": province_owner,
         "diplomatic_status": {},
         "pending_proposals": {},
+        "sieges": {},
         "last_event": None,
         "log": [],
     }

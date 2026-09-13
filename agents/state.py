@@ -53,6 +53,13 @@ class GameState(TypedDict):
     `game/run_game.py`'s persistence layer (and later the backend's
     WebSocket broadcast) can consume "what just happened" directly instead
     of diffing consecutive states to figure it out.
+
+    `sieges` maps a province id under active siege to `{"attacker_id":
+    str, "progress": int}` — ephemeral operational state, not ownership
+    (which stays solely in `province_owner`), following the same pattern
+    as `pending_proposals`. A siege only persists while its attacker keeps
+    pressing the same target every one of their own turns; see
+    `game.rules.resolve_action` for the exact lapse/decisive-battle rules.
     """
 
     turn: int
@@ -63,5 +70,6 @@ class GameState(TypedDict):
     province_owner: dict[str, str]
     diplomatic_status: dict[str, str]
     pending_proposals: dict[str, str]
+    sieges: dict[str, dict]
     last_event: dict | None
     log: Annotated[list[str], operator.add]

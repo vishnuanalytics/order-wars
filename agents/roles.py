@@ -42,3 +42,27 @@ def describe(role_preset: str) -> str:
     not a closed set the code should hard-fail on.
     """
     return ROLE_PRESET_PROMPTS.get(role_preset, ROLE_PRESET_PROMPTS["custom"])
+
+
+# Which specialist (see agents/graph.py's _dispatch_specialist) a faction
+# reaches for first, second, and third absent a siege-in-progress or
+# incoming-proposal override. Always a permutation of all three domains —
+# never fully excludes one, so no role preset is permanently locked out of
+# expansion/economy/diplomacy — just ordered to match each preset's stated
+# priorities above.
+ROLE_PRESET_SPECIALIST_ORDER: dict[str, list[str]] = {
+    "expansionist": ["military", "economic", "diplomatic"],
+    "warmonger": ["military", "diplomatic", "economic"],
+    "diplomat_trader": ["diplomatic", "economic", "military"],
+    "isolationist": ["economic", "military", "diplomatic"],
+    "custom": ["military", "economic", "diplomatic"],
+}
+
+
+def specialist_order(role_preset: str) -> list[str]:
+    """Return the specialist rotation order for a role preset name.
+
+    Same unrecognized-name fallback as `describe()` — role presets are
+    user-supplied, not a closed set the code should hard-fail on.
+    """
+    return ROLE_PRESET_SPECIALIST_ORDER.get(role_preset, ROLE_PRESET_SPECIALIST_ORDER["custom"])

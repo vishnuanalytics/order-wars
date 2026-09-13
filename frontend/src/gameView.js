@@ -70,6 +70,7 @@ export class GameView {
         resolution: event.payload?.resolution,
         target_province: event.payload?.target_province,
         target_faction: event.payload?.target_faction,
+        specialist: event.payload?.specialist,
       });
     }
   }
@@ -87,7 +88,9 @@ export class GameView {
     const actor = this.factionNameById[event.faction_id] || event.faction_id;
     const target = event.target_province || event.target_faction || "";
     li.textContent =
-      `Turn ${event.turn} — ${actor}: ${event.action_type}` +
+      `Turn ${event.turn} — ${actor}` +
+      (event.specialist ? ` [${event.specialist}]` : "") +
+      `: ${event.action_type}` +
       (target ? ` -> ${target}` : "") +
       (event.resolution ? ` (${event.resolution})` : "");
     this.eventLogEl.prepend(li);
