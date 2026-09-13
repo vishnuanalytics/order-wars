@@ -66,6 +66,7 @@ def _state(**overrides) -> GameState:
         "capitals": {"rome": HOME, "carthage": FAR_AWAY},
         "province_captured_turn": {},
         "province_development": {},
+        "trade_agreements": {},
         "rebellion_seed": 42,
         "log": [],
     }
@@ -589,6 +590,69 @@ def test_negotiate_matching_proposal_from_both_sides_resolves_it():
     assert result["diplomatic_status"][pair_key("rome", "carthage")] == "alliance"
     assert "carthage->rome" not in result["pending_proposals"]
     assert "rome->carthage" not in result["pending_proposals"]
+
+
+def test_negotiate_trade_one_sided_records_encoded_offer():
+    """A trade offer is stored in pending_proposals as a plain string
+    ("trade:{resource}:{amount}"), same field/type as truce/alliance --
+    see the module docstring for why."""
+    state = _state()
+    result = resolve_action(
+        state, "rome",
+        _action("negotiate", target_faction="carthage", proposal="trade", offer_resource="gold", offer_amount=5),
+    )
+    assert result["pending_proposals"]["rome->carthage"] == "trade:gold:5"
+    assert pair_key("rome", "carthage") not in result["trade_agreements"]
+
+
+def test_negotiate_trade_activates_with_mismatched_terms_on_both_sides():
+    """Unlike truce/alliance (exact-match required), a trade activates as
+    soon as both sides have *any* outstanding trade offer to each other --
+    the amounts/resources don't need to match."""
+    state = _state(pending_proposals={"carthage->rome": "trade:grain:8"})
+    result = resolve_action(
+        state, "rome",
+        _action("negotiate", target_faction="carthage", proposal="trade", offer_resource="gold", offer_amount=5),
+    )
+    agreement = result["trade_agreements"][pair_key("rome", "carthage")]
+    assert agreement["rome"] == {"resource": "gold", "amount": 5}
+    assert agreement["carthage"] == {"resource": "grain", "amount": 8}
+    assert "carthage->rome" not in result["pending_proposals"]
+    assert "rome->carthage" not in result["pending_proposals"]
+    assert "agreed a trade" in result["resolution"]
+
+
+def test_trade_agreement_only_delivers_the_acting_factions_own_share():
+    """A trade agreement's exchange happens per-actor (like income/supply
+    attrition) -- on Rome's turn, only Rome's committed resource moves;
+    Carthage's committed grain moves only when Carthage itself acts."""
+    state = _state(
+        trade_agreements={
+            pair_key("rome", "carthage"): {
+                "rome": {"resource": "gold", "amount": 5},
+                "carthage": {"resource": "grain", "amount": 3},
+            }
+        },
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert result["factions"]["rome"]["resources"]["gold"] == 15  # 20 - 5 given
+    assert result["factions"]["carthage"]["resources"]["gold"] == 25  # 20 + 5 received
+    assert result["factions"]["rome"]["resources"]["grain"] == 1  # only income (HOME, plains), not trade
+
+
+def test_trade_agreement_gives_only_what_is_affordable():
+    state = _state(
+        trade_agreements={
+            pair_key("rome", "carthage"): {
+                "rome": {"resource": "gold", "amount": 50},
+                "carthage": {"resource": "grain", "amount": 3},
+            }
+        },
+        factions={"rome": _faction("rome", "Rome", gold=10), "carthage": _faction("carthage", "Carthage")},
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert result["factions"]["rome"]["resources"]["gold"] == 0  # gave everything it had
+    assert result["factions"]["carthage"]["resources"]["gold"] == 30  # 20 + 10 received
 
 
 def test_territory_of_reflects_province_owner():

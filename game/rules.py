@@ -41,6 +41,22 @@ persists through a change of ownership — capturing a well-developed enemy
 province is valuable, not reset to 0 — since it represents built
 infrastructure (roads, fortifications, administration), not the prior
 owner's loyalty.
+
+Trade agreements reuse `negotiate`/`pending_proposals` almost as-is
+(`proposal="trade"`, still stored as a plain string there — see
+`agents/state.py`) but with different reciprocal-match semantics than
+truce/alliance: those match on the two proposals being *identical*
+(the same status agreed by both), which doesn't fit trade (the two sides
+almost never offer the same resource/amount back). Instead, a trade
+activates once *both* sides have *any* outstanding trade offer to each
+other — see `_negotiate_trade`. Once activated it's a standing
+`trade_agreements` entry (not an ephemeral `pending_proposals` one)
+delivering each side's committed resource to the other every turn
+(`_apply_trade_agreements`, alongside income/supply attrition in each
+actor's own per-turn upkeep) until overwritten by a fresh agreement
+between the same pair. A side that can't afford its full commitment gives
+what it can rather than breaking the agreement outright — there's no
+"trade agreement broken" consequence yet, a deliberate simplification.
 """
 
 import hashlib
@@ -205,6 +221,37 @@ def _apply_supply_attrition(
     faction["units"] = _attrit(faction["units"], fraction)
 
 
+def _apply_trade_agreements(
+    factions: dict[str, FactionState],
+    faction: FactionState,
+    faction_id: str,
+    trade_agreements: dict[str, dict],
+) -> None:
+    """Delivers this faction's half of every active trade agreement it's
+    party to, as part of its own per-turn upkeep (alongside income/supply
+    attrition) — the other half flows when the other party takes their own
+    turn, so a full round completes the exchange in both directions.
+
+    A faction that can't afford its full commitment gives what it can
+    (there's no "trade agreement broken" consequence yet — see the module
+    docstring); giving 0 is a silent no-op, not an error.
+    """
+    for terms in trade_agreements.values():
+        if faction_id not in terms:
+            continue
+        other_id = next(fid for fid in terms if fid != faction_id)
+        give = terms[faction_id]
+        resource, amount = give["resource"], give["amount"]
+        transferred = min(faction["resources"].get(resource, 0), amount)
+        if transferred <= 0:
+            continue
+        faction["resources"][resource] -= transferred
+        receiver = dict(factions[other_id])
+        receiver["resources"] = dict(receiver["resources"])
+        receiver["resources"][resource] = receiver["resources"].get(resource, 0) + transferred
+        factions[other_id] = receiver
+
+
 def _rebellion_roll(seed: int, province_id: str, turn: int) -> float:
     """Deterministic pseudo-random float in [0, 1) for a (seed, province,
     turn) triple — see the module docstring for why this is a hash, not
@@ -257,6 +304,40 @@ def _check_rebellions(
     return rebelled
 
 
+def _negotiate_trade(
+    faction_id: str,
+    target: str,
+    action: FactionAction,
+    pending_proposals: dict[str, str],
+    trade_agreements: dict[str, dict],
+) -> str:
+    """Trade's reciprocal check differs from truce/alliance's exact-match
+    (see the module docstring): a trade activates once *both* sides have
+    *any* outstanding trade offer to each other, not necessarily matching
+    resource/amount. Mutates `pending_proposals`/`trade_agreements` in
+    place; returns the resolution string.
+    """
+    incoming_key = f"{target}->{faction_id}"
+    outgoing_key = f"{faction_id}->{target}"
+    incoming = pending_proposals.get(incoming_key)
+
+    if incoming is not None and incoming.startswith("trade:"):
+        _, their_resource, their_amount = incoming.split(":", 2)
+        trade_agreements[pair_key(faction_id, target)] = {
+            faction_id: {"resource": action.offer_resource, "amount": action.offer_amount},
+            target: {"resource": their_resource, "amount": int(their_amount)},
+        }
+        pending_proposals.pop(incoming_key, None)
+        pending_proposals.pop(outgoing_key, None)
+        return (
+            f"agreed a trade with {target}: give {action.offer_amount} "
+            f"{action.offer_resource}/turn, receive {their_amount} {their_resource}/turn"
+        )
+
+    pending_proposals[outgoing_key] = f"trade:{action.offer_resource}:{action.offer_amount}"
+    return f"proposed a trade to {target}: {action.offer_amount} {action.offer_resource}/turn"
+
+
 def _attrit(units: dict[str, int], fraction: float) -> dict[str, int]:
     """Reduce every nonzero unit type by `fraction`, rounded up.
 
@@ -275,11 +356,11 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
 
     Returns a partial `GameState` update: full replacement values for
     `factions`, `province_owner`, `diplomatic_status`, `pending_proposals`,
-    `sieges`, `province_captured_turn`, and `province_development`
-    (LangGraph has no merge reducer for these dict fields, so a node must
-    return the complete new value, not a patch — see `agents/state.py`),
-    plus `resolution` (a short human-readable string the caller appends to
-    the turn's log line).
+    `sieges`, `province_captured_turn`, `province_development`, and
+    `trade_agreements` (LangGraph has no merge reducer for these dict
+    fields, so a node must return the complete new value, not a patch —
+    see `agents/state.py`), plus `resolution` (a short human-readable
+    string the caller appends to the turn's log line).
     """
     factions = dict(state["factions"])
     faction = dict(factions[faction_id])
@@ -289,11 +370,13 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
     owned = territory_of(state, faction_id)
     _apply_income(faction, owned, state["province_development"])
     _apply_supply_attrition(faction, faction_id, owned, state["sieges"])
+    _apply_trade_agreements(factions, faction, faction_id, state["trade_agreements"])
 
     province_owner = dict(state["province_owner"])
     diplomatic_status = dict(state["diplomatic_status"])
     pending_proposals = dict(state["pending_proposals"])
     province_development = dict(state["province_development"])
+    trade_agreements = dict(state["trade_agreements"])
     sieges = dict(state["sieges"])
     province_captured_turn = dict(state["province_captured_turn"])
     resolution = ""
@@ -355,15 +438,18 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
     elif action.action_type == "negotiate":
         target = action.target_faction
         proposal = action.proposal
-        incoming_key = f"{target}->{faction_id}"
-        if pending_proposals.get(incoming_key) == proposal:
-            diplomatic_status[pair_key(faction_id, target)] = proposal
-            pending_proposals.pop(incoming_key, None)
-            pending_proposals.pop(f"{faction_id}->{target}", None)
-            resolution = f"and {target} agreed to a {proposal}"
+        if proposal == "trade":
+            resolution = _negotiate_trade(faction_id, target, action, pending_proposals, trade_agreements)
         else:
-            pending_proposals[f"{faction_id}->{target}"] = proposal
-            resolution = f"proposed a {proposal} to {target}"
+            incoming_key = f"{target}->{faction_id}"
+            if pending_proposals.get(incoming_key) == proposal:
+                diplomatic_status[pair_key(faction_id, target)] = proposal
+                pending_proposals.pop(incoming_key, None)
+                pending_proposals.pop(f"{faction_id}->{target}", None)
+                resolution = f"and {target} agreed to a {proposal}"
+            else:
+                pending_proposals[f"{faction_id}->{target}"] = proposal
+                resolution = f"proposed a {proposal} to {target}"
 
     elif action.action_type == "move_army":
         target_province = action.target_province
@@ -427,5 +513,6 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         "sieges": sieges,
         "province_captured_turn": province_captured_turn,
         "province_development": province_development,
+        "trade_agreements": trade_agreements,
         "resolution": resolution,
     }

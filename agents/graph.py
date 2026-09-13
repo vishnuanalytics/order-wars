@@ -90,6 +90,16 @@ def _siege_summary(state: GameState, faction_id: str) -> str:
     return "; ".join(own) if own else "none"
 
 
+def _describe_proposal(raw: str) -> str:
+    """A stored proposal is usually just the ProposalType string itself,
+    but a trade offer is encoded as "trade:{resource}:{amount}" (see
+    game.rules's trade docs) — decode that into readable text."""
+    if raw.startswith("trade:"):
+        _, resource, amount = raw.split(":", 2)
+        return f"trade offering {amount} {resource}/turn"
+    return raw
+
+
 def _diplomacy_summary(state: GameState, faction_id: str) -> str:
     lines = []
     for other_id in _other_faction_ids(state, faction_id):
@@ -98,9 +108,25 @@ def _diplomacy_summary(state: GameState, faction_id: str) -> str:
         line = f"{other_name} ({other_id}): {status}"
         incoming = state["pending_proposals"].get(f"{other_id}->{faction_id}")
         if incoming:
-            line += f" — they have proposed a {incoming}"
+            line += f" — they have proposed a {_describe_proposal(incoming)}"
         lines.append(line)
     return "; ".join(lines) if lines else "no other factions"
+
+
+def _trade_summary(state: GameState, faction_id: str) -> str:
+    active = []
+    for pair, terms in state["trade_agreements"].items():
+        if faction_id not in terms:
+            continue
+        other_id = next(fid for fid in terms if fid != faction_id)
+        give = terms[faction_id]
+        get = terms[other_id]
+        other_name = state["factions"][other_id]["name"]
+        active.append(
+            f"with {other_name}: give {give['amount']} {give['resource']}/turn, "
+            f"receive {get['amount']} {get['resource']}/turn"
+        )
+    return "; ".join(active) if active else "none"
 
 
 def _refresh_intent(faction: FactionState, other_names: list[str]) -> str:
@@ -227,7 +253,14 @@ def _diplomatic_prompt(state: GameState, faction_id: str) -> str:
         _specialist_preamble(faction, faction_id)
         + "You are the diplomat/trade agent: manage external relations, "
         "executing the leader's intent tactically.\n"
+        f"Your resources: {faction['resources']}.\n"
         f"Other factions and your relations with them: {_diplomacy_summary(state, faction_id)}\n"
+        "To negotiate a recurring trade, propose (or accept an outstanding "
+        "offer from) target_faction with proposal='trade', offer_resource, "
+        "and offer_amount to give per turn — the trade activates once you "
+        "both have an outstanding trade offer to each other, even if the "
+        "amounts/resources differ.\n"
+        f"Your active trade agreements: {_trade_summary(state, faction_id)}\n"
         "Choose this turn's action. For negotiate/declare_war, "
         f"target_faction must be one of: {', '.join(other_ids) or 'none'}."
     )
@@ -302,6 +335,13 @@ def _sanitize_action(
             action_type="hold",
             rationale="negotiate without a proposal type sanitized to hold",
         )
+    if action.action_type == "negotiate" and action.proposal == "trade" and (
+        not action.offer_resource or not action.offer_amount or action.offer_amount <= 0
+    ):
+        return FactionAction(
+            action_type="hold",
+            rationale="trade proposal missing a valid offer_resource/offer_amount sanitized to hold",
+        )
     return action
 
 
@@ -350,6 +390,7 @@ def faction_turn(state: GameState) -> dict:
         "sieges": resolved["sieges"],
         "province_captured_turn": resolved["province_captured_turn"],
         "province_development": resolved["province_development"],
+        "trade_agreements": resolved["trade_agreements"],
         "active_faction_idx": next_idx,
         "turn": next_turn,
         "last_event": last_event,
@@ -446,6 +487,7 @@ def initial_state_for(
         "capitals": capitals,
         "province_captured_turn": {},
         "province_development": {},
+        "trade_agreements": {},
         "rebellion_seed": (
             rebellion_seed if rebellion_seed is not None else random.SystemRandom().getrandbits(32)
         ),

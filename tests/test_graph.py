@@ -44,6 +44,7 @@ def _state(factions: dict[str, FactionState], province_owner: dict[str, str], **
         "capitals": {"rome": ROME_HOME, "carthage": CARTHAGE_HOME},
         "province_captured_turn": {},
         "province_development": {},
+        "trade_agreements": {},
         "rebellion_seed": 42,
         "last_event": None,
         "log": [],
@@ -146,6 +147,37 @@ def test_sanitize_action_allows_a_known_unit_type():
 
     assert sanitized.action_type == "build_unit"
     assert sanitized.unit_type == "cavalry"
+
+
+def test_sanitize_action_downgrades_trade_proposal_missing_offer_details():
+    state = _state(
+        {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+    )
+    action = FactionAction(
+        action_type="negotiate", target_faction="carthage", proposal="trade", rationale="testing"
+    )  # no offer_resource/offer_amount
+
+    sanitized = _sanitize_action(state, "rome", action, move_targets=[])
+
+    assert sanitized.action_type == "hold"
+    assert "sanitized to hold" in sanitized.rationale
+
+
+def test_sanitize_action_allows_a_complete_trade_proposal():
+    state = _state(
+        {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+    )
+    action = FactionAction(
+        action_type="negotiate", target_faction="carthage", proposal="trade",
+        offer_resource="gold", offer_amount=5, rationale="testing",
+    )
+
+    sanitized = _sanitize_action(state, "rome", action, move_targets=[])
+
+    assert sanitized.action_type == "negotiate"
+    assert sanitized.offer_amount == 5
 
 
 def test_dispatch_specialist_prioritizes_a_siege_in_progress():

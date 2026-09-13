@@ -1099,8 +1099,50 @@ predicted.
   specifically. 137/137 tests pass, no live LLM calls needed (pure rules
   logic; the only prompt change is explanatory text).
 
-Stages 8–11 will each get their own short validation pass against the real
-code before implementation (the same way stages 1-7 needed real data/code
+### Stage 8 — trade agreements (done)
+
+- `agents/actions.py`: `ProposalType` gained `"trade"`; `FactionAction`/
+  `DiplomaticAction` gained `offer_resource`/`offer_amount` (what the
+  proposer commits to give per turn, once agreed).
+- **The one real design fork this stage**: `negotiate`'s existing
+  reciprocal check (`pending_proposals.get(incoming_key) == proposal`)
+  matches truce/alliance by exact equality — the same status agreed by
+  both sides. Trade can't use that: the two sides' resource/amount are
+  expected to *differ* (that's the point of a trade), so "propose the
+  identical thing" can never be satisfied. `_negotiate_trade` implements
+  different reciprocal semantics instead — a trade activates once *both*
+  sides have *any* outstanding trade offer to each other, regardless of
+  whether the terms match. `pending_proposals`'s value type stays a plain
+  string throughout (not widened to a dict) by encoding a trade offer as
+  `"trade:{resource}:{amount}"` — every existing reader of that field
+  (`_diplomacy_summary`) keeps working unchanged; `_describe_proposal`
+  decodes it for display.
+- New `GameState.trade_agreements` (keyed like `diplomatic_status`, by
+  `pair_key`) is a **persistent** agreement, unlike ephemeral
+  `pending_proposals` entries — once activated it stays in effect
+  indefinitely. `_apply_trade_agreements` delivers each side's committed
+  resource to the other as part of that side's own per-turn upkeep
+  (alongside income/supply attrition — same established pattern), so a
+  full round completes the bidirectional exchange; verified with a test
+  that on Rome's turn only Rome's committed resource moves; Carthage's
+  committed resource moves only when Carthage itself acts. A faction
+  short on its commitment gives what it can rather than the agreement
+  breaking outright — no "trade broken" consequence yet, a deliberate
+  simplification flagged in the module docstring, not silently dropped.
+- `agents/graph.py`'s diplomatic prompt gained a `_trade_summary()`
+  (active agreements, what's given/received, derived from live state) and
+  an explanation of the propose/accept-with-different-terms mechanic.
+  `_sanitize_action` downgrades a trade proposal missing
+  `offer_resource`/`offer_amount` to hold, same precedent as negotiate
+  without a `proposal` type.
+- `tests/test_rules.py`: one-sided offer encoding, activation with
+  deliberately mismatched terms (proving the reciprocal check isn't
+  exact-match), per-actor delivery isolation, and partial delivery when
+  short on the committed resource. 143/143 tests pass, no live LLM calls
+  needed (pure rules logic; the only prompt change is explanatory text).
+
+Stages 9–11 will each get their own short validation pass against the real
+code before implementation (the same way stages 1-8 needed real data/code
 to calibrate correctly, not just up-front assumptions), landing as their
 own commits in this same order.
 

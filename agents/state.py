@@ -46,7 +46,13 @@ class GameState(TypedDict):
     "war"/"truce"/"alliance"; an absent key means neutral (the default).
     `pending_proposals` is keyed `"{proposer}->{target}"` (order matters —
     it's a one-sided offer until the target reciprocates) with a
-    `agents.actions.ProposalType` value.
+    `agents.actions.ProposalType` value — a plain string always, even for
+    `"trade"`: a trade offer is encoded as `"trade:{resource}:{amount}"`
+    rather than widening this field's value type to a dict, so every
+    existing reader of `pending_proposals` (e.g. `_diplomacy_summary`)
+    keeps working unchanged. See `game.rules`'s trade docs for why trade's
+    reciprocal check (does *any* outstanding trade offer exist both ways)
+    differs from truce/alliance's (do the two proposals match exactly).
 
     `last_event` is a self-describing record of the most recently resolved
     turn (turn/faction_id/the action's fields/its resolution) — added so
@@ -75,6 +81,16 @@ class GameState(TypedDict):
     owner: it deliberately persists through a change of ownership (see
     `game.rules`'s development docs for why capturing a well-developed
     province stays valuable rather than resetting).
+
+    `trade_agreements` is keyed by `game.rules.pair_key(a, b)` (like
+    `diplomatic_status`) — unlike `pending_proposals`, this is a
+    *persistent* agreement, not an ephemeral offer: once activated it
+    stays in effect indefinitely, delivering each side's committed
+    resource to the other every turn, until overwritten by a fresh
+    agreement between the same two factions. Value shape: `{faction_a_id:
+    {"resource": str, "amount": int}, faction_b_id: {"resource": str,
+    "amount": int}}` — the two sides' amounts/resources need not match
+    (that's the point of a trade).
     """
 
     turn: int
@@ -89,6 +105,7 @@ class GameState(TypedDict):
     capitals: dict[str, str]
     province_captured_turn: dict[str, int]
     province_development: dict[str, int]
+    trade_agreements: dict[str, dict]
     rebellion_seed: int
     last_event: dict | None
     log: Annotated[list[str], operator.add]
