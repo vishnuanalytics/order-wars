@@ -60,6 +60,15 @@ class GameState(TypedDict):
     as `pending_proposals`. A siege only persists while its attacker keeps
     pressing the same target every one of their own turns; see
     `game.rules.resolve_action` for the exact lapse/decisive-battle rules.
+
+    `capitals` (faction id -> province id) and `rebellion_seed` are set
+    once in `initial_state_for` and never rewritten afterward — a fixed
+    geographic anchor and a fixed per-game seed, respectively (a capital
+    doesn't move even if captured; see `game.rules`'s rebellion docs for
+    why). `province_captured_turn` (province id -> the `turn` it was last
+    captured) is the one of these three that *does* mutate every time
+    ownership changes via `move_army`; a province with no entry has been
+    held since game start and is exempt from rebellion.
     """
 
     turn: int
@@ -71,5 +80,8 @@ class GameState(TypedDict):
     diplomatic_status: dict[str, str]
     pending_proposals: dict[str, str]
     sieges: dict[str, dict]
+    capitals: dict[str, str]
+    province_captured_turn: dict[str, int]
+    rebellion_seed: int
     last_event: dict | None
     log: Annotated[list[str], operator.add]

@@ -8,6 +8,8 @@ from agents.actions import UnitType
 from agents.state import FactionState, GameState
 from game.rules import (
     COUNTERS,
+    REBELLION_DISTANCE_THRESHOLD,
+    REBELLION_GRACE_TURNS,
     SIEGE_TURNS_TO_DECIDE,
     SUPPLY_FREE_RANGE,
     UNIT_COSTS,
@@ -58,6 +60,9 @@ def _state(**overrides) -> GameState:
         "diplomatic_status": {},
         "pending_proposals": {},
         "sieges": {},
+        "capitals": {"rome": HOME, "carthage": FAR_AWAY},
+        "province_captured_turn": {},
+        "rebellion_seed": 42,
         "log": [],
     }
     base.update(overrides)
@@ -79,7 +84,12 @@ def _besiege(state, attacker_id, target_province):
     result = None
     for _ in range(SIEGE_TURNS_TO_DECIDE):
         result = resolve_action(state, attacker_id, _action("move_army", target_province=target_province))
-        state = {**state, "sieges": result["sieges"], "factions": result["factions"]}
+        state = {
+            **state,
+            "sieges": result["sieges"],
+            "factions": result["factions"],
+            "province_captured_turn": result["province_captured_turn"],
+        }
     return result
 
 
@@ -291,6 +301,75 @@ def test_supply_attrition_only_hits_the_attacker_not_the_defender():
     )
     result = resolve_action(state, "carthage", _action("hold"))
     assert result["factions"]["carthage"]["units"]["legion"] == 10  # defender untouched
+
+
+def test_no_rebellion_for_a_province_held_since_game_start():
+    """No province_captured_turn entry means never conquered -- exempt
+    regardless of distance from capital or how the roll would land."""
+    state = _state(
+        province_owner={HOME: "rome", FAR_AWAY: "rome"},
+        capitals={"rome": HOME},
+        rebellion_seed=3,  # known to roll low for FAR_AWAY at turn 1 (see below)
+        turn=1,
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert FAR_AWAY in result["province_owner"]
+
+
+def test_no_rebellion_within_the_distance_threshold():
+    assert REBELLION_DISTANCE_THRESHOLD >= 1  # NEIGHBOR is 1 hex from HOME
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "rome"},
+        capitals={"rome": HOME},
+        province_captured_turn={NEIGHBOR: 0},
+        turn=1,
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert NEIGHBOR in result["province_owner"]  # too close to capital to ever rebel
+
+
+def test_no_rebellion_after_the_grace_period_expires():
+    state = _state(
+        province_owner={HOME: "rome", FAR_AWAY: "rome"},
+        capitals={"rome": HOME},
+        province_captured_turn={FAR_AWAY: 0},
+        rebellion_seed=3,  # would roll low for FAR_AWAY at turn 1, if still at risk
+        turn=REBELLION_GRACE_TURNS + 1,  # grace period has passed
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert FAR_AWAY in result["province_owner"]  # settled, exempt now
+
+
+def test_rebellion_reverts_a_recent_distant_conquest_to_unclaimed():
+    # Real, computed values: seed=3 rolls 0.1006 for FAR_AWAY at turn=1,
+    # below REBELLION_CHANCE_PER_TURN (0.15); FAR_AWAY is 4 hexes from HOME,
+    # beyond REBELLION_DISTANCE_THRESHOLD (3); turn 1 - captured_turn 0 = 1,
+    # within REBELLION_GRACE_TURNS (3) -- every condition for rebellion holds.
+    state = _state(
+        province_owner={HOME: "rome", FAR_AWAY: "rome"},
+        capitals={"rome": HOME},
+        province_captured_turn={FAR_AWAY: 0},
+        rebellion_seed=3,
+        turn=1,
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert FAR_AWAY not in result["province_owner"]
+    assert FAR_AWAY not in result["province_captured_turn"]
+    assert "rebelled" in result["resolution"]
+
+
+def test_rebellion_only_applies_to_the_owning_factions_own_turn():
+    """Rebellion is checked as part of the owning faction's own upkeep, not
+    triggered by another faction's turn."""
+    state = _state(
+        province_owner={HOME: "rome", FAR_AWAY: "rome", NEIGHBOR: "carthage"},
+        capitals={"rome": HOME, "carthage": NEIGHBOR},
+        province_captured_turn={FAR_AWAY: 0},
+        rebellion_seed=3,
+        turn=1,
+    )
+    result = resolve_action(state, "carthage", _action("hold"))
+    assert FAR_AWAY in result["province_owner"]  # untouched -- not carthage's turn's concern
 
 
 def test_unit_type_literal_matches_unit_costs_and_counters():

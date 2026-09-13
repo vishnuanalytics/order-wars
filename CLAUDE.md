@@ -996,8 +996,61 @@ predicted.
   defender). 124/124 tests pass, no live LLM calls needed (pure rules
   logic).
 
-Stages 6–11 will each get their own short validation pass against the real
-code before implementation (the same way stages 1-5 needed real data/code
+### Stage 6 — rebellion/unrest (done)
+
+- `agents/state.py`: three new `GameState` fields — `capitals` (faction id
+  -> province id, set once in `initial_state_for` from each faction's
+  starting `home_province` and never rewritten, even if the capital itself
+  later falls — a fixed geographic anchor, not "wherever a faction
+  currently holds"), `province_captured_turn` (province id -> the `turn`
+  it was last captured — absent means held since game start, exempt from
+  rebellion forever unless later lost and recaptured), and
+  `rebellion_seed` (one real random draw per game, in `initial_state_for`,
+  optionally pinnable for reproducible tests/replays).
+- `game/rules.py`: this is the project's **first randomized mechanic**,
+  and deliberately *not* real randomness — `_rebellion_roll` hashes
+  `(rebellion_seed, province_id, turn)` into a deterministic pseudo-random
+  float instead of calling `random.random()`, so `resolve_action` stays a
+  pure function of its inputs (its own docstring's first sentence,
+  unbroken through 6 stages now) and every rebellion outcome is exactly
+  reproducible/testable without mocking a `random.Random` instance —
+  unpredictability comes entirely from the once-per-game seed draw, not
+  from impure per-call randomness.
+- `_check_rebellions`: a province recently captured by its current owner
+  (within `REBELLION_GRACE_TURNS` = 3 turns) **and** far from that owner's
+  capital (beyond `REBELLION_DISTANCE_THRESHOLD` = 3 hexes, via Stage 5's
+  `distance_between`) risks reverting to unclaimed each turn
+  (`REBELLION_CHANCE_PER_TURN` = 15%). Deliberately measured from the
+  **capital**, not nearest-owned-territory like supply attrition (Stage
+  5) — a distinct concern (administrative reach/legitimacy vs. logistics):
+  a faction with plenty of nearby holdings can still fail to pacify a
+  far-flung new conquest. Once a province survives its grace period, it's
+  considered settled and never rebels again regardless of distance, until
+  it changes hands once more.
+- `move_army`'s peaceful-capture and decisive-siege-victory branches now
+  record `province_captured_turn`; re-reinforcing already-owned territory
+  does not reset the clock (not a new capture). A rebellion appends to the
+  turn's `resolution` string (flows into `GameEvent.payload` through the
+  existing generic pass-through, zero `run_game.py` changes) rather than
+  needing a new structured field, matching how the siege/supply mechanics
+  already communicate through resolution text.
+- `agents/graph.py`'s military specialist prompt gained a one-line
+  explanation of the mechanic (no per-province risk display yet, unlike
+  the siege-distance line Stage 5 added — there's no consolidation action
+  to act on that information with until Stage 7's province development,
+  so a detailed readout would be informational noise without a lever to
+  pull).
+- `tests/test_rules.py`: real computed roll values (not arbitrary
+  fixtures) — found via a small script that `seed=3` rolls 0.1006 for the
+  FAR_AWAY test province at turn 1, below the 15% threshold, giving an
+  exact, reproducible positive test case alongside the negative ones
+  (held-since-start, within distance, grace-period-expired, and that
+  rebellion only fires on the owning faction's own turn). 129/129 tests
+  pass, no live LLM calls needed (pure rules logic; the only prompt change
+  is explanatory text).
+
+Stages 7–11 will each get their own short validation pass against the real
+code before implementation (the same way stages 1-6 needed real data/code
 to calibrate correctly, not just up-front assumptions), landing as their
 own commits in this same order.
 

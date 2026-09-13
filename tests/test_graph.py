@@ -1,7 +1,7 @@
 from langgraph.graph import END
 
 from agents import graph as graph_module
-from agents.actions import DiplomaticAction, EconomicAction, FactionAction, MilitaryAction
+from agents.actions import FactionAction, MilitaryAction
 from agents.graph import (
     _dispatch_specialist,
     _sanitize_action,
@@ -41,6 +41,9 @@ def _state(factions: dict[str, FactionState], province_owner: dict[str, str], **
         "diplomatic_status": {},
         "pending_proposals": {},
         "sieges": {},
+        "capitals": {"rome": ROME_HOME, "carthage": CARTHAGE_HOME},
+        "province_captured_turn": {},
+        "rebellion_seed": 42,
         "last_event": None,
         "log": [],
     }

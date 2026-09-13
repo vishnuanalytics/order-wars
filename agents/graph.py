@@ -17,6 +17,7 @@ pure/LLM-free and independently tested.
 """
 
 import os
+import random
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -28,6 +29,8 @@ from agents.roles import describe, specialist_order
 from agents.state import FactionState, GameState
 from game.rules import (
     COUNTERS,
+    REBELLION_DISTANCE_THRESHOLD,
+    REBELLION_GRACE_TURNS,
     SIEGE_TURNS_TO_DECIDE,
     SUPPLY_FREE_RANGE,
     UNIT_COSTS,
@@ -172,7 +175,10 @@ def _military_prompt(state: GameState, faction_id: str, move_targets: list[str])
         "anywhere else in between abandons the siege with no losses. A "
         f"siege more than {SUPPLY_FREE_RANGE} hexes from your own territory "
         "costs your army ongoing supply-line attrition every turn you "
-        "maintain it — the further, the worse.\n"
+        "maintain it — the further, the worse. A province you conquer more "
+        f"than {REBELLION_DISTANCE_THRESHOLD} hexes from your capital risks "
+        f"rebelling back to unclaimed for its first {REBELLION_GRACE_TURNS} "
+        "turns under your rule — territory close to home settles safely.\n"
         f"Sieges you're actively pressing (press the same target again to "
         f"continue it): {_siege_summary(state, faction_id)}\n"
         "Choose this turn's action. For move_army, target_province must be "
@@ -323,6 +329,7 @@ def faction_turn(state: GameState) -> dict:
         "diplomatic_status": resolved["diplomatic_status"],
         "pending_proposals": resolved["pending_proposals"],
         "sieges": resolved["sieges"],
+        "province_captured_turn": resolved["province_captured_turn"],
         "active_faction_idx": next_idx,
         "turn": next_turn,
         "last_event": last_event,
@@ -367,15 +374,25 @@ def require_llm_configured() -> None:
         )
 
 
-def initial_state_for(faction_configs: list[dict], max_turns: int) -> GameState:
+def initial_state_for(
+    faction_configs: list[dict], max_turns: int, rebellion_seed: int | None = None
+) -> GameState:
     """Build the starting `GameState` for a game. Each entry in
     `faction_configs` is a dict with `faction_id`, `name`, `role_preset`, and
     `home_province` (a real province id from `map_data/provinces.geojson` —
-    the faction's sole starting territory). Optional `resources`/`units`
-    override `STARTING_RESOURCES`/`STARTING_UNITS` per faction — this is
-    what makes a scenario's customized starting resources/units (see
-    `db.models.ScenarioFaction`) actually affect the simulation, not just
-    get recorded in the persisted config and then silently ignored.
+    the faction's sole starting territory, and permanently its `capitals`
+    entry — see `game.rules`'s rebellion docs for why a capital is a fixed
+    geographic anchor, not wherever a faction currently holds). Optional
+    `resources`/`units` override `STARTING_RESOURCES`/`STARTING_UNITS` per
+    faction — this is what makes a scenario's customized starting
+    resources/units (see `db.models.ScenarioFaction`) actually affect the
+    simulation, not just get recorded in the persisted config and then
+    silently ignored.
+
+    `rebellion_seed` defaults to a real random draw (different each game,
+    for unpredictability) but can be pinned for reproducible tests/replays —
+    everything downstream of it (`game.rules._rebellion_roll`) is a
+    deterministic function of this one value plus (province, turn).
 
     Shared by `run()` (below, single blocking `.invoke()`) and
     `game/run_game.py` (which needs the same state but drives the graph via
@@ -394,6 +411,7 @@ def initial_state_for(faction_configs: list[dict], max_turns: int) -> GameState:
         for cfg in faction_configs
     }
     province_owner = {cfg["home_province"]: cfg["faction_id"] for cfg in faction_configs}
+    capitals = {cfg["faction_id"]: cfg["home_province"] for cfg in faction_configs}
 
     return {
         "turn": 0,
@@ -405,6 +423,11 @@ def initial_state_for(faction_configs: list[dict], max_turns: int) -> GameState:
         "diplomatic_status": {},
         "pending_proposals": {},
         "sieges": {},
+        "capitals": capitals,
+        "province_captured_turn": {},
+        "rebellion_seed": (
+            rebellion_seed if rebellion_seed is not None else random.SystemRandom().getrandbits(32)
+        ),
         "last_event": None,
         "log": [],
     }

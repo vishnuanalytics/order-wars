@@ -8,17 +8,31 @@ live — `agents/graph.py` calls `resolve_action` rather than mutating state
 itself.
 
 Combat weighs unit-type matchups (COUNTERS/_effective_strength), attacking
-enemy territory is a multi-turn siege (see SIEGE_TURNS_TO_DECIDE), and a
+enemy territory is a multi-turn siege (see SIEGE_TURNS_TO_DECIDE), a
 faction sieging far from its own territory suffers ongoing supply-line
-attrition (see SUPPLY_FREE_RANGE) — but is still scoped deliberately simple
-otherwise (see CLAUDE.md "Gameplay depth rollout" and `agents/actions.py`):
-one pooled army per faction (no per-province garrisons — a siege tracks
-*who* is attacking *which* province, and supply attrition is a distance
-proxy off that, rather than either tracking where units physically sit)
-and diplomacy as a plain reciprocal handshake (no power-triggered coalition
+attrition (see SUPPLY_FREE_RANGE), and a recently conquered province far
+from its new owner's capital risks rebelling back to unclaimed (see
+REBELLION_GRACE_TURNS) — but is still scoped deliberately simple otherwise
+(see CLAUDE.md "Gameplay depth rollout" and `agents/actions.py`): one
+pooled army per faction (no per-province garrisons — a siege tracks *who*
+is attacking *which* province, and supply attrition is a distance proxy
+off that, rather than either tracking where units physically sit) and
+diplomacy as a plain reciprocal handshake (no power-triggered coalition
 mechanics). Those are later gameplay-depth stages, not missing polish.
+
+Rebellion is the project's first randomized mechanic, and it's
+deliberately *not* real randomness (`random.random()`) — `_rebellion_roll`
+hashes `(rebellion_seed, province_id, turn)` into a deterministic pseudo-
+random float instead, so `resolve_action` stays a pure function of its
+inputs (this module's docstring's first sentence) and a rebellion outcome
+is exactly reproducible/testable without mocking a `random.Random`
+instance. `rebellion_seed` itself is picked once per game (a real random
+draw, in `agents/graph.py`'s `initial_state_for`) so different games still
+feel unpredictable — only the per-call resolution is deterministic, not
+the game-to-game outcome.
 """
 
+import hashlib
 import math
 
 from agents.actions import FactionAction
@@ -84,6 +98,19 @@ TERRAIN_DEFENSE_BONUS: dict[str, float] = {"hills": 0.3}
 # owned territory are short enough to sustain for free.
 SUPPLY_FREE_RANGE = 2
 SUPPLY_ATTRITION_PER_HEX = 0.05  # additional fraction lost per hex beyond the free range
+
+# Rebellion: a recently conquered province far from its owner's capital may
+# revert to unclaimed. Distinct from supply attrition on purpose — supply
+# is about distance from your *current* frontier/holdings (an operational
+# concern), rebellion is about distance from your *capital* specifically
+# (an administrative-reach/legitimacy concern) — a faction with plenty of
+# nearby territory can still fail to pacify a far-flung new conquest.
+# Grace period only: once a province survives REBELLION_GRACE_TURNS turns
+# under its new owner without incident, it's considered settled and never
+# rebels again regardless of distance (until it changes hands once more).
+REBELLION_GRACE_TURNS = 3
+REBELLION_DISTANCE_THRESHOLD = 3  # hexes from capital; closer provinces never rebel
+REBELLION_CHANCE_PER_TURN = 0.15
 
 
 def pair_key(faction_a: str, faction_b: str) -> str:
@@ -153,6 +180,51 @@ def _apply_supply_attrition(
     faction["units"] = _attrit(faction["units"], fraction)
 
 
+def _rebellion_roll(seed: int, province_id: str, turn: int) -> float:
+    """Deterministic pseudo-random float in [0, 1) for a (seed, province,
+    turn) triple — see the module docstring for why this is a hash, not
+    `random.random()`."""
+    digest = hashlib.sha256(f"{seed}:{province_id}:{turn}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def _check_rebellions(
+    faction_id: str,
+    owned: list[str],
+    province_owner: dict[str, str],
+    province_captured_turn: dict[str, int],
+    capital: str | None,
+    rebellion_seed: int,
+    turn: int,
+) -> list[str]:
+    """Mutates `province_owner`/`province_captured_turn` in place, reverting
+    any province that rebels to unclaimed. Returns the ids that rebelled
+    this turn (for the caller's resolution message).
+
+    Only provinces both recently captured by this faction (an entry in
+    `province_captured_turn` within REBELLION_GRACE_TURNS of `turn`) and
+    far from its capital (beyond REBELLION_DISTANCE_THRESHOLD hexes) are at
+    risk — a province with no capture-turn entry has been held since game
+    start (or has already survived its grace period) and is exempt. A
+    faction with no recorded capital (shouldn't happen — every faction gets
+    one in `initial_state_for`) never rebels, defensively.
+    """
+    if capital is None:
+        return []
+    rebelled = []
+    for province_id in owned:
+        captured_turn = province_captured_turn.get(province_id)
+        if captured_turn is None or turn - captured_turn > REBELLION_GRACE_TURNS:
+            continue
+        if distance_between(province_id, capital) <= REBELLION_DISTANCE_THRESHOLD:
+            continue
+        if _rebellion_roll(rebellion_seed, province_id, turn) < REBELLION_CHANCE_PER_TURN:
+            province_owner.pop(province_id, None)
+            province_captured_turn.pop(province_id, None)
+            rebelled.append(province_id)
+    return rebelled
+
+
 def _attrit(units: dict[str, int], fraction: float) -> dict[str, int]:
     """Reduce every nonzero unit type by `fraction`, rounded up.
 
@@ -171,10 +243,10 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
 
     Returns a partial `GameState` update: full replacement values for
     `factions`, `province_owner`, `diplomatic_status`, `pending_proposals`,
-    and `sieges` (LangGraph has no merge reducer for these dict fields, so
-    a node must return the complete new value, not a patch — see
-    `agents/state.py`), plus `resolution` (a short human-readable string the
-    caller appends to the turn's log line).
+    `sieges`, and `province_captured_turn` (LangGraph has no merge reducer
+    for these dict fields, so a node must return the complete new value,
+    not a patch — see `agents/state.py`), plus `resolution` (a short
+    human-readable string the caller appends to the turn's log line).
     """
     factions = dict(state["factions"])
     faction = dict(factions[faction_id])
@@ -189,7 +261,13 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
     diplomatic_status = dict(state["diplomatic_status"])
     pending_proposals = dict(state["pending_proposals"])
     sieges = dict(state["sieges"])
+    province_captured_turn = dict(state["province_captured_turn"])
     resolution = ""
+
+    rebelled = _check_rebellions(
+        faction_id, owned, province_owner, province_captured_turn,
+        state["capitals"].get(faction_id), state["rebellion_seed"], state["turn"],
+    )
 
     # A siege only persists while its attacker keeps pressing that exact
     # target every one of their own turns — abandon any of this faction's
@@ -240,6 +318,8 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         target_province = action.target_province
         owner = province_owner.get(target_province)
         if owner is None or owner == faction_id:
+            if owner is None:
+                province_captured_turn[target_province] = state["turn"]
             province_owner[target_province] = faction_id
             sieges.pop(target_province, None)  # moot once peacefully held
             resolution = f"moved into {target_province} (now held)"
@@ -269,6 +349,7 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
                 sieges.pop(target_province, None)
                 if attacker_strength > defender_strength:
                     province_owner[target_province] = faction_id
+                    province_captured_turn[target_province] = state["turn"]
                     faction["units"] = _attrit(faction["units"], COMBAT_WINNER_ATTRITION)
                     defender["units"] = _attrit(defender["units"], COMBAT_LOSER_ATTRITION)
                     resolution = f"broke the siege of {target_province}, captured from {owner}"
@@ -280,11 +361,15 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
 
     factions[faction_id] = faction
 
+    if rebelled:
+        resolution += f" (meanwhile, {', '.join(rebelled)} rebelled and reverted to unclaimed)"
+
     return {
         "factions": factions,
         "province_owner": province_owner,
         "diplomatic_status": diplomatic_status,
         "pending_proposals": pending_proposals,
         "sieges": sieges,
+        "province_captured_turn": province_captured_turn,
         "resolution": resolution,
     }
