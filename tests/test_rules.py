@@ -9,16 +9,19 @@ from agents.state import FactionState, GameState
 from game.rules import (
     COUNTERS,
     SIEGE_TURNS_TO_DECIDE,
+    SUPPLY_FREE_RANGE,
     UNIT_COSTS,
     diplomatic_status_between,
     pair_key,
     resolve_action,
     territory_of,
 )
+from map_data.loader import distance_between
 
 HOME = "831e80fffffffff"  # Italy 20, terrain=plains -> income yields grain
 NEIGHBOR = "831e81fffffffff"  # Italy 19, adjacent to HOME
-FAR_AWAY = "83386efffffffff"  # Tunisia 2, not adjacent to HOME
+FAR_AWAY = "83386efffffffff"  # Tunisia 2, not adjacent to HOME -- 4 hexes away
+HILLS = "831eebfffffffff"  # Bulgaria 6, terrain=hills -- 9 hexes from HOME
 
 
 def _faction(
@@ -91,8 +94,7 @@ def test_income_applied_every_turn_regardless_of_action():
 
 def test_income_yields_resource_matching_each_owned_provinces_terrain():
     coastal = NEIGHBOR  # Italy 19, terrain=coastal -> gold
-    hills = "831eebfffffffff"  # Bulgaria 6, terrain=hills -> iron
-    state = _state(province_owner={HOME: "rome", coastal: "rome", hills: "rome"})
+    state = _state(province_owner={HOME: "rome", coastal: "rome", HILLS: "rome"})
     result = resolve_action(state, "rome", _action("hold"))
     resources = result["factions"]["rome"]["resources"]
     assert resources["grain"] == 1  # HOME, plains
@@ -216,17 +218,79 @@ def test_terrain_defense_bonus_can_flip_an_otherwise_losing_defense():
     """6 attacking legions vs 5 defending legions on hills terrain: without
     the +30% hills defense bonus the attacker would win outright (6 > 5);
     with it, the defender's effective strength (5 * 1.3 = 6.5) holds."""
-    hills = "831eebfffffffff"  # Bulgaria 6, terrain=hills
     state = _state(
-        province_owner={HOME: "rome", hills: "carthage"},
+        province_owner={HOME: "rome", HILLS: "carthage"},
         diplomatic_status={pair_key("rome", "carthage"): "war"},
         factions={
             "rome": _faction("rome", "Rome", legions=6),
             "carthage": _faction("carthage", "Carthage", legions=5),
         },
     )
-    result = _besiege(state, "rome", hills)
-    assert result["province_owner"][hills] == "carthage"  # defender held thanks to terrain
+    result = _besiege(state, "rome", HILLS)
+    assert result["province_owner"][HILLS] == "carthage"  # defender held thanks to terrain
+
+
+def test_distance_between_real_provinces():
+    assert distance_between(HOME, HOME) == 0
+    assert distance_between(HOME, NEIGHBOR) == 1
+    assert distance_between(HOME, FAR_AWAY) == 4
+    assert distance_between(NEIGHBOR, HOME) == distance_between(HOME, NEIGHBOR)  # symmetric
+
+
+def test_supply_attrition_does_not_apply_without_an_active_siege():
+    """A siege that's merely begun (progress 1, no combat yet) still counts
+    as "actively pressing" for supply purposes -- attrition is about
+    maintaining a distant commitment, not just the decisive turn."""
+    state = _state(province_owner={HOME: "rome"})
+    result = resolve_action(state, "rome", _action("hold"))
+    assert result["factions"]["rome"]["units"]["legion"] == 2  # unchanged, no siege at all
+
+
+def test_supply_attrition_does_not_apply_within_the_free_range():
+    state = _state(
+        province_owner={HOME: "rome"},
+        sieges={NEIGHBOR: {"attacker_id": "rome", "progress": 1}},  # 1 hex away
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert result["factions"]["rome"]["units"]["legion"] == 2  # unchanged, well within SUPPLY_FREE_RANGE
+
+
+def test_supply_attrition_applies_beyond_the_free_range():
+    # HOME -> HILLS is 9 hexes; (9 - SUPPLY_FREE_RANGE) * 0.05 = 0.35 fraction.
+    assert 9 - SUPPLY_FREE_RANGE > 0
+    state = _state(
+        province_owner={HOME: "rome"},
+        sieges={HILLS: {"attacker_id": "rome", "progress": 1}},
+        factions={"rome": _faction("rome", "Rome", legions=10), "carthage": _faction("carthage", "Carthage")},
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    # ceil(10 * 0.35) = 4 lost -> 6 remain.
+    assert result["factions"]["rome"]["units"]["legion"] == 6
+
+
+def test_supply_attrition_uses_the_farthest_of_multiple_sieges():
+    state = _state(
+        province_owner={HOME: "rome"},
+        sieges={
+            NEIGHBOR: {"attacker_id": "rome", "progress": 1},  # 1 hex -- free
+            HILLS: {"attacker_id": "rome", "progress": 1},  # 9 hexes -- costly
+        },
+        factions={"rome": _faction("rome", "Rome", legions=10), "carthage": _faction("carthage", "Carthage")},
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert result["factions"]["rome"]["units"]["legion"] == 6  # driven by HILLS, not NEIGHBOR
+
+
+def test_supply_attrition_only_hits_the_attacker_not_the_defender():
+    """A faction being besieged isn't the one straining its own supply
+    lines -- only whoever is listed as attacker_id pays this cost."""
+    state = _state(
+        province_owner={HOME: "rome", HILLS: "carthage"},
+        sieges={HILLS: {"attacker_id": "rome", "progress": 1}},
+        factions={"rome": _faction("rome", "Rome", legions=10), "carthage": _faction("carthage", "Carthage", legions=10)},
+    )
+    result = resolve_action(state, "carthage", _action("hold"))
+    assert result["factions"]["carthage"]["units"]["legion"] == 10  # defender untouched
 
 
 def test_unit_type_literal_matches_unit_costs_and_counters():

@@ -29,12 +29,13 @@ from agents.state import FactionState, GameState
 from game.rules import (
     COUNTERS,
     SIEGE_TURNS_TO_DECIDE,
+    SUPPLY_FREE_RANGE,
     UNIT_COSTS,
     diplomatic_status_between,
     resolve_action,
     territory_of,
 )
-from map_data.loader import get_province, name_of, neighbors_of, sea_neighbors_of
+from map_data.loader import distance_between, get_province, name_of, neighbors_of, sea_neighbors_of
 
 INTENT_REFRESH_INTERVAL = 3
 
@@ -70,11 +71,17 @@ def _unit_options_summary() -> str:
 
 
 def _siege_summary(state: GameState, faction_id: str) -> str:
-    own = [
-        f"{pid} ({name_of(pid)}, progress {siege['progress']}/{SIEGE_TURNS_TO_DECIDE})"
-        for pid, siege in state["sieges"].items()
-        if siege["attacker_id"] == faction_id
-    ]
+    owned = territory_of(state, faction_id)
+    own = []
+    for pid, siege in state["sieges"].items():
+        if siege["attacker_id"] != faction_id:
+            continue
+        hops = min((distance_between(pid, o) for o in owned), default=0)
+        supply_note = (
+            f", {hops} hexes from supply — attrition!" if hops > SUPPLY_FREE_RANGE
+            else f", {hops} hexes from supply"
+        )
+        own.append(f"{pid} ({name_of(pid)}, progress {siege['progress']}/{SIEGE_TURNS_TO_DECIDE}{supply_note})")
     return "; ".join(own) if own else "none"
 
 
@@ -162,7 +169,10 @@ def _military_prompt(state: GameState, faction_id: str, move_targets: list[str])
         "Attacking enemy territory is a siege, not instant combat: "
         f"move_army into the same enemy province {SIEGE_TURNS_TO_DECIDE} of "
         "your own turns in a row to force the decisive battle. Attacking "
-        "anywhere else in between abandons the siege with no losses.\n"
+        "anywhere else in between abandons the siege with no losses. A "
+        f"siege more than {SUPPLY_FREE_RANGE} hexes from your own territory "
+        "costs your army ongoing supply-line attrition every turn you "
+        "maintain it — the further, the worse.\n"
         f"Sieges you're actively pressing (press the same target again to "
         f"continue it): {_siege_summary(state, faction_id)}\n"
         "Choose this turn's action. For move_army, target_province must be "

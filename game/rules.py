@@ -7,21 +7,23 @@ LLM-free, so it's fully unit-testable without mocking anything (see
 live — `agents/graph.py` calls `resolve_action` rather than mutating state
 itself.
 
-Combat weighs unit-type matchups (COUNTERS/_effective_strength) and
-attacking enemy territory is a multi-turn siege (see SIEGE_TURNS_TO_DECIDE),
-but is still scoped deliberately simple otherwise (see CLAUDE.md "Gameplay
-depth rollout" and `agents/actions.py`): one pooled army per faction (no
-per-province garrisons — a siege tracks *who* is attacking *which*
-province, not where either side's units physically sit) and diplomacy as
-a plain reciprocal handshake (no power-triggered coalition mechanics).
-Those are later gameplay-depth stages, not missing polish.
+Combat weighs unit-type matchups (COUNTERS/_effective_strength), attacking
+enemy territory is a multi-turn siege (see SIEGE_TURNS_TO_DECIDE), and a
+faction sieging far from its own territory suffers ongoing supply-line
+attrition (see SUPPLY_FREE_RANGE) — but is still scoped deliberately simple
+otherwise (see CLAUDE.md "Gameplay depth rollout" and `agents/actions.py`):
+one pooled army per faction (no per-province garrisons — a siege tracks
+*who* is attacking *which* province, and supply attrition is a distance
+proxy off that, rather than either tracking where units physically sit)
+and diplomacy as a plain reciprocal handshake (no power-triggered coalition
+mechanics). Those are later gameplay-depth stages, not missing polish.
 """
 
 import math
 
 from agents.actions import FactionAction
 from agents.state import FactionState, GameState
-from map_data.loader import get_province
+from map_data.loader import distance_between, get_province
 
 # Each owned province yields 1 unit/turn of the resource tied to its
 # terrain (see map_data.generate_map's Stage 1 terrain classification) —
@@ -71,6 +73,18 @@ SIEGE_TURNS_TO_DECIDE = 2
 # coastal provinces don't (an unrecognized/missing terrain defaults to 0).
 TERRAIN_DEFENSE_BONUS: dict[str, float] = {"hills": 0.3}
 
+# Supply-line attrition: a lightweight proxy for logistics, since the
+# project deliberately has no per-province garrisons to track an army's
+# actual physical position (see the module docstring). Uses the farthest
+# province a faction is currently besieging as its "front line" — a siege
+# is the one persistent, well-defined marker of "where this faction's
+# offensive is currently committed" that already exists in state, unlike a
+# one-off peaceful move_army. A faction not currently sieging anywhere
+# suffers no supply attrition; sieges within SUPPLY_FREE_RANGE hexes of
+# owned territory are short enough to sustain for free.
+SUPPLY_FREE_RANGE = 2
+SUPPLY_ATTRITION_PER_HEX = 0.05  # additional fraction lost per hex beyond the free range
+
 
 def pair_key(faction_a: str, faction_b: str) -> str:
     """Order-independent key for a pairwise relation between two factions."""
@@ -119,6 +133,26 @@ def _apply_income(faction: FactionState, owned: list[str]) -> None:
         )
 
 
+def _apply_supply_attrition(
+    faction: FactionState, faction_id: str, owned: list[str], sieges: dict[str, dict]
+) -> None:
+    """Ongoing attrition on a faction's pooled army for maintaining a siege
+    far from its own territory — see SUPPLY_FREE_RANGE/SUPPLY_ATTRITION_PER_HEX.
+    Uses the *farthest* of this faction's active sieges (one pooled army,
+    strained by its most extended commitment, not summed across sieges).
+    """
+    own_sieges = [pid for pid, siege in sieges.items() if siege["attacker_id"] == faction_id]
+    if not own_sieges or not owned:
+        return
+
+    farthest = max(min(distance_between(pid, o) for o in owned) for pid in own_sieges)
+    if farthest <= SUPPLY_FREE_RANGE:
+        return
+
+    fraction = min(1.0, SUPPLY_ATTRITION_PER_HEX * (farthest - SUPPLY_FREE_RANGE))
+    faction["units"] = _attrit(faction["units"], fraction)
+
+
 def _attrit(units: dict[str, int], fraction: float) -> dict[str, int]:
     """Reduce every nonzero unit type by `fraction`, rounded up.
 
@@ -149,6 +183,7 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
 
     owned = territory_of(state, faction_id)
     _apply_income(faction, owned)
+    _apply_supply_attrition(faction, faction_id, owned, state["sieges"])
 
     province_owner = dict(state["province_owner"])
     diplomatic_status = dict(state["diplomatic_status"])

@@ -65,6 +65,38 @@ def sea_neighbors_of(province_id: str) -> tuple[str, ...]:
     return province.sea_neighbors if province else ()
 
 
+def distance_between(start: str, goal: str) -> int:
+    """Hop-distance between two provinces over the combined land+sea
+    adjacency graph (BFS, unweighted — a hex is a hex whether crossed by
+    land or by a naval lane). Returns 0 if start == goal.
+
+    The whole graph is a single connected component (confirmed when naval
+    lanes were added — see generate_map.py's Stage 1 notes: the land mass
+    was already one component, and every coastal province has at least one
+    sea lane by construction), so this always terminates via the goal
+    branch; the `visited`-exhaustion guard only protects against a future,
+    genuinely disconnected map rather than anything possible today.
+    """
+    if start == goal:
+        return 0
+    all_ids = set(all_province_ids())
+    visited = {start}
+    frontier = [start]
+    distance = 0
+    while frontier and len(visited) < len(all_ids):
+        distance += 1
+        next_frontier = []
+        for pid in frontier:
+            for neighbor in (*neighbors_of(pid), *sea_neighbors_of(pid)):
+                if neighbor == goal:
+                    return distance
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    next_frontier.append(neighbor)
+        frontier = next_frontier
+    return distance  # goal unreachable from start — shouldn't happen today
+
+
 def province_ids_in_country(country: str) -> list[str]:
     return [p.province_id for p in _load().values() if p.country == country]
 

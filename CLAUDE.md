@@ -960,8 +960,44 @@ predicted.
   verbatim — sufficient to narrate what happened without a new column.
 - No live LLM calls needed: 112/112 tests pass, all mocked/direct.
 
-Stages 5–11 will each get their own short validation pass against the real
-code before implementation (the same way stages 1-4 needed real data/code
+### Stage 5 — supply-line attrition (done)
+
+- `map_data/loader.py`: new `distance_between(a, b) -> int` — unweighted
+  BFS hop-distance over the combined land+sea adjacency graph (a hex is a
+  hex whether crossed by land or a naval lane). Verified against real data:
+  HOME→NEIGHBOR = 1, HOME→FAR_AWAY (Italy↔Tunisia) = 4, terminates
+  instantly even for far pairs since the whole graph is one connected
+  component (confirmed when Stage 1 added naval lanes).
+- `game/rules.py`: `_apply_supply_attrition`, called every turn right
+  after `_apply_income` — a faction actively pressing a siege more than
+  `SUPPLY_FREE_RANGE` (2) hexes from its own territory sheds
+  `SUPPLY_ATTRITION_PER_HEX` (5%) of its pooled army per hex beyond that,
+  capped at 100%. Uses the *farthest* of a faction's active sieges (one
+  pooled army, strained by its most extended commitment, not summed
+  across multiple sieges) — deliberately anchored to sieges specifically
+  (not "wherever a faction's last move_army went") since a siege is the
+  one persistent, well-defined "where is this faction's offensive
+  currently committed" signal that already exists in state; a faction not
+  currently sieging anywhere pays no supply cost. Only the attacker pays —
+  a defender fighting on its own soil isn't straining supply lines.
+  Confirmed this doesn't require per-province garrisons (deliberately out
+  of scope, see the module docstring): the siege dict already records
+  *which* province a faction is attacking, which is all the distance
+  calculation needs.
+- `agents/graph.py`'s `_siege_summary` now shows each of a faction's
+  active sieges' hex-distance from supply, flagged when it's costing
+  attrition, and the military specialist's prompt explains the mechanic —
+  so the LLM can reason about overextension, not just discover it after
+  the fact via a shrinking unit count.
+- `tests/test_rules.py`: direct `distance_between` tests plus supply-
+  attrition coverage (no active siege → no cost; within free range → no
+  cost; beyond it → exact ceil-rounded loss, same rounding convention as
+  combat's `_attrit`; farthest-of-multiple-sieges; attacker-only, not
+  defender). 124/124 tests pass, no live LLM calls needed (pure rules
+  logic).
+
+Stages 6–11 will each get their own short validation pass against the real
+code before implementation (the same way stages 1-5 needed real data/code
 to calibrate correctly, not just up-front assumptions), landing as their
 own commits in this same order.
 
