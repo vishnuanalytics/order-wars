@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Order Wars</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <h1>Order Wars</h1>
+        <div id="game-status" class="game-status"></div>
+      </header>
+
+      <main class="app-main">
+        <div id="map"></div>
+
+        <aside class="sidebar">
+          <nav class="tabs">
+            <button class="tab-button active" data-tab="scenario">Scenario</button>
+            <button class="tab-button" data-tab="games">Games</button>
+          </nav>
+
+          <section id="tab-scenario" class="tab-panel active">
+            <h2>Scenario editor</h2>
+            <form id="scenario-form">
+              <label>
+                Name
+                <input type="text" id="scenario-name" required value="New Scenario" />
+              </label>
+              <label>
+                Max turns
+                <input type="number" id="scenario-max-turns" min="1" max="200" value="10" required />
+              </label>
+
+              <div id="faction-list"></div>
+              <button type="button" id="add-faction-button">+ Add faction</button>
+
+              <div class="form-actions">
+                <button type="submit">Save scenario</button>
+              </div>
+            </form>
+
+            <p class="hint" id="pick-province-hint" hidden>
+              Click a province on the map to set the home province for
+              <strong id="pick-province-target"></strong>.
+            </p>
+
+            <h3>Saved scenarios</h3>
+            <ul id="scenario-list" class="item-list"></ul>
+
+            <div class="form-actions">
+              <button type="button" id="start-game-button" disabled>Start game from selected scenario</button>
+            </div>
+          </section>
+
+          <section id="tab-games" class="tab-panel">
+            <h2>Games</h2>
+            <ul id="game-list" class="item-list"></ul>
+            <div id="game-detail"></div>
+            <h3>Event log</h3>
+            <ul id="event-log" class="event-log"></ul>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

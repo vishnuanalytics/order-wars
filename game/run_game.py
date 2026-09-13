@@ -314,12 +314,15 @@ def _play_game(
 
     for state in graph.stream(initial_state, config, stream_mode="values"):
         final_state = state
-        if on_event is not None:
-            on_event(state)
-
         event = state.get("last_event")
+
         if event is None:
-            continue  # the initial state, before any faction has acted
+            # The initial state, before any faction has acted — nothing to
+            # persist yet, but backend/ still wants this one broadcast so a
+            # freshly-connected client sees the starting board immediately.
+            if on_event is not None:
+                on_event(state)
+            continue
 
         with _scoped_session(session_factory) as session:
             session.add(
@@ -356,20 +359,44 @@ def _play_game(
             # assume that stays true as more action types are added.
             _mark_eliminated_factions(session, state, db_faction_id, event["turn"])
 
-            if state["active_faction_idx"] == 0:  # a full round just completed
-                for faction_id, faction in state["factions"].items():
-                    owned = territory_of(state, faction_id)
-                    session.add(
-                        FactionStateSnapshot(
-                            game_id=game_id,
-                            faction_id=db_faction_id[faction_id],
-                            turn=state["turn"],
-                            resources=dict(faction["resources"]),
-                            territory_count=len(owned),
-                            territory=owned,
-                            unit_count=sum(faction["units"].values()),
-                        )
+            # Upserted after every action, not just once per completed round
+            # (verified live: a frontend watching a game found the map stayed
+            # completely uncolored for the entire first round, since that's
+            # how long it took for any FactionStateSnapshot to exist at all).
+            # Keyed on event["turn"] (the round number, constant for every
+            # action within a round) rather than state["turn"] (which only
+            # advances once the round wraps) — using the latter here would
+            # give a round's earlier actions a different, stale turn number
+            # than its last one, fragmenting what should be one snapshot.
+            # Upsert, not insert: this can now run multiple times against
+            # the same (game_id, faction_id, turn) — e.g. a faction acting,
+            # then getting raided as a defender, both inside round N — and
+            # a second plain insert would violate FactionStateSnapshot's
+            # unique constraint on that triple.
+            for faction_id, faction in state["factions"].items():
+                owned = territory_of(state, faction_id)
+                snapshot = (
+                    session.query(FactionStateSnapshot)
+                    .filter_by(game_id=game_id, faction_id=db_faction_id[faction_id], turn=event["turn"])
+                    .one_or_none()
+                )
+                if snapshot is None:
+                    snapshot = FactionStateSnapshot(
+                        game_id=game_id, faction_id=db_faction_id[faction_id], turn=event["turn"]
                     )
+                    session.add(snapshot)
+                snapshot.resources = dict(faction["resources"])
+                snapshot.territory_count = len(owned)
+                snapshot.territory = owned
+                snapshot.unit_count = sum(faction["units"].values())
+
+        # Only now, after the transaction above has committed — broadcasting
+        # first (as this used to) let a WebSocket subscriber's immediate
+        # REST follow-up race the still-in-flight DB write and read stale
+        # data. Caught by a test asserting on DB state from inside on_event,
+        # not by inspection.
+        if on_event is not None:
+            on_event(state)
 
         winner_faction_id = check_winner(state)
         if winner_faction_id is not None:

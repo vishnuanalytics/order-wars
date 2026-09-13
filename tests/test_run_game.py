@@ -174,6 +174,53 @@ def test_run_game_stops_at_max_turns_with_no_winner(sqlite_sessionmaker, monkeyp
         assert session.query(FactionStateSnapshot).count() == 4
 
 
+def test_snapshot_exists_mid_round_not_only_after_it_completes(sqlite_sessionmaker, monkeypatch):
+    """A frontend watching a game live needs to color the map before the
+    first full round finishes, not just after — this reproduces that with 3
+    factions so there's an observable "mid-round" moment (after faction
+    a's turn, before b and c have acted).
+    """
+
+    def _peaceful_state(faction_configs, max_turns):
+        return graph_module.initial_state_for(faction_configs, max_turns)
+
+    monkeypatch.setattr(run_game_module, "initial_state_for", _peaceful_state)
+
+    class _HoldLLM:
+        def __init__(self, *a, **k):
+            pass
+
+        def invoke(self, prompt):
+            return FactionAction(action_type="hold", rationale="test")
+
+    monkeypatch.setattr(
+        graph_module, "build_llm",
+        lambda max_tokens=64, schema=None: (_HoldLLM() if schema is not None else _FakeIntentLLM()),
+    )
+
+    three_factions = FACTION_CONFIGS + [
+        {"faction_id": "c", "name": "Third", "role_preset": "custom", "home_province": "83386efffffffff"}
+    ]
+
+    seen_mid_round_snapshot_count = []
+
+    def _on_event(state):
+        if state.get("last_event") and state["last_event"]["faction_id"] == "a" and state["turn"] == 0:
+            with sqlite_sessionmaker() as session:
+                seen_mid_round_snapshot_count.append(session.query(FactionStateSnapshot).count())
+
+    run_game(three_factions, max_turns=1, session_factory=sqlite_sessionmaker, on_event=_on_event)
+
+    assert seen_mid_round_snapshot_count == [3]  # a's own turn already snapshots all 3 factions
+    with sqlite_sessionmaker() as session:
+        snapshot = (
+            session.query(FactionStateSnapshot)
+            .filter_by(game_id=session.query(Game).one().id, turn=1)
+            .count()
+        )
+        assert snapshot == 3  # still exactly 3 after b and c also act — upserted, not duplicated
+
+
 def test_create_game_returns_id_before_playing(sqlite_sessionmaker):
     """The whole point of the create/play split: backend/ needs the game id
     fast, without waiting for any turns to actually run.

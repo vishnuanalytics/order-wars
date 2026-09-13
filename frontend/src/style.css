@@ -1,0 +1,249 @@
+:root {
+  color-scheme: light;
+  --border: #d8d8d8;
+  --bg-panel: #fafafa;
+  --text-muted: #666;
+  --accent: #0072b2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #1a1a1a;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.app-header h1 {
+  font-size: 1.2rem;
+  margin: 0;
+}
+
+.game-status {
+  font-size: 0.85rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 1rem;
+  background: #eee;
+  color: var(--text-muted);
+}
+.game-status.status-running { background: #fff3cd; color: #7a5c00; }
+.game-status.status-completed { background: #d4edda; color: #14532d; }
+.game-status.status-failed { background: #f8d7da; color: #7a1f27; }
+
+.app-main {
+  display: flex;
+  flex: 1;
+  min-height: 0; /* let children scroll instead of the flex item growing past the viewport */
+}
+
+#map {
+  flex: 1;
+  height: 100%;
+}
+/* Mutes the OSM basemap so the colored province hexes stay the focus. */
+#map .leaflet-tile-pane {
+  filter: grayscale(1) brightness(1.15) contrast(0.85);
+}
+
+.sidebar {
+  width: 380px;
+  min-width: 320px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  overflow-y: auto;
+  padding: 0.75rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.tab-button {
+  flex: 1;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  background: #fff;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.tab-button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+form label {
+  display: block;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+form input[type="text"],
+form input[type="number"] {
+  display: block;
+  width: 100%;
+  padding: 0.3rem;
+  margin-top: 0.15rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+/* Two flex rows per faction, not one wide grid — a single row with a name
+   input, role select, province button, two number inputs, and a remove
+   button didn't fit the sidebar's width; the remove button clipped past the
+   visible edge (caught in a real screenshot, not just by inspecting the CSS). */
+.faction-row {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+.faction-row-line {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+.faction-row-line + .faction-row-line {
+  margin-top: 0.3rem;
+}
+.faction-row input,
+.faction-row select,
+.faction-row button {
+  padding: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  min-width: 0; /* let flex items shrink below their content size */
+}
+.faction-name { flex: 2; }
+.faction-role { flex: 1; }
+.pick-province-button {
+  flex: 1;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.faction-stat { display: flex; align-items: center; gap: 0.2rem; font-size: 0.75rem; color: var(--text-muted); }
+.faction-stat input { width: 3.2rem; flex-shrink: 0; }
+.pick-province-button.picked {
+  background: #e6f2ff;
+  border-color: var(--accent);
+}
+.remove-faction-button {
+  color: #a00;
+  cursor: pointer;
+}
+
+.form-actions {
+  margin-top: 0.75rem;
+}
+.form-actions button,
+#add-faction-button {
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.form-actions button:disabled {
+  background: #aaa;
+  border-color: #aaa;
+  cursor: not-allowed;
+}
+#add-faction-button {
+  background: #fff;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+}
+
+.hint {
+  background: #fff3cd;
+  border: 1px solid #ffe08a;
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.item-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0;
+}
+.item-list button {
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem;
+  margin-bottom: 0.2rem;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.item-list button.selected {
+  border-color: var(--accent);
+  background: #e6f2ff;
+}
+
+.faction-summary {
+  list-style: none;
+  padding: 0;
+  font-size: 0.85rem;
+}
+.faction-summary li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+.swatch {
+  display: inline-block;
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.event-log {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.78rem;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.event-log li {
+  padding: 0.3rem 0.2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.fatal-error {
+  padding: 2rem;
+  color: #7a1f27;
+  font-family: monospace;
+}

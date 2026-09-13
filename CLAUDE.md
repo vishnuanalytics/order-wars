@@ -233,6 +233,7 @@ order-wars/
 - Run a game: `python -m game.run_game`
 - Generate/refresh the map: `python map_data/generate_map.py`
 - Run backend: `uvicorn backend.main:app --reload`
+- Run frontend (dev server): `cd frontend && npm install && npm run dev`
 - Run tests: `pytest tests/`
 - Run eval on a completed game: `python -m eval.run_eval --game-id <id>`
 - Apply DB migrations: `alembic upgrade head` (requires `DATABASE_URL` in `.env`)
@@ -388,9 +389,9 @@ came up.
         that war is currently symbolic — neither side can ever `move_army`
         into the other without a land bridge. Worth knowing before treating
         "at war" as meaning "actively fighting."
-- [~] Phase 5 — game loop + visualization (in progress: game loop + Postgres
-      wiring + FastAPI/WebSocket backend done; Leaflet/D3 frontend and the
-      scenario-editor UI are not built yet)
+- [x] Phase 5 — game loop + visualization (game loop, Postgres wiring,
+      FastAPI/WebSocket backend, and the Leaflet frontend/scenario-editor UI
+      all done — see below for what's still rough)
   - [x] Real Neon persistence wired up (`db/session.py` now actually used
         by the app, not just designed): `DATABASE_URL` added, connection
         verified, and every table isolated under an `order_wars` Postgres
@@ -534,9 +535,76 @@ came up.
         a message that will never come — same as before this fix, not a
         regression, since a late subscriber got nothing either way; this
         only stops the bookkeeping itself from leaking.
-  - [ ] Not yet built: Leaflet/D3 frontend (`frontend/`) and the
-        scenario-editor UI (`backend/`'s scenario endpoints exist for it to
-        call, but nothing calls them yet outside tests/manual `curl`)
+  - [x] `frontend/`: Vite + vanilla JS (no framework — there's no
+        significant client-side state or logic to justify one; the backend
+        owns every rule) + Leaflet for the map. Not React/Vue as might be
+        assumed by default; a deliberate call since CLAUDE.md already said
+        "Leaflet/D3 frontend," not a specific JS framework.
+      - `mapView.js`: renders `provinces.geojson` as a Leaflet layer,
+        colors provinces by faction (a stable palette assigned in
+        first-seen order), supports a "pick a province" mode for the
+        scenario editor
+      - `scenarioEditor.js`: add/remove factions, set role preset/starting
+        resources/units, click the map to set each faction's home
+        province (rejects two factions picking the same one client-side,
+        the same check `game/run_game.py`'s `create_game` already
+        enforces server-side) — submits to `POST /scenarios`
+      - `gameView.js`: start a game from a saved scenario, connect to
+        `WS /games/{id}/live`, recolor the map and append to an event log
+        as messages arrive; select a past game from `GET /games` to
+        either watch it live (if still running) or load its full history
+        at once via `GET /games/{id}/events` (replay, no live connection)
+      - **Actually visually verified, not just API-checked** — this
+        environment initially had no working headless browser (Playwright's
+        Chromium was cached but `libnspr4.so`/`libnss3.so`/`libasound.so.2`
+        were missing, and there's no root to `apt install` them). Worked
+        around it without root: `apt-get download` (unlike `apt install`,
+        needs no privileges) the `.deb`s, `dpkg-deb -x` to extract them to a
+        local directory, then `LD_LIBRARY_PATH` pointed at that directory
+        for the Chromium launch. From there, real screenshots plus a
+        scripted Playwright run (fill the form, click the map to pick
+        provinces, save, start a game, watch it play) against the real
+        backend/Neon/LLMs — not just inspection — caught real bugs a
+        build-only check never would have:
+        - CARTO's free anonymous tile endpoint (`basemaps.cartocdn.com`)
+          turned out to require an API key now — the basemap rendered as
+          tiled "API KEY REQUIRED" watermarks. Switched to standard OSM
+          tiles (still keyless), toned down with a CSS grayscale filter to
+          keep the colored province hexes as the visual focus.
+        - The faction-row layout (name/role/remove on one line, a
+          province-picker button, gold/legion inputs on others) clipped
+          the remove button past the sidebar's edge in a real 1400px
+          screenshot — not apparent from reading the CSS. Rebuilt as
+          stacked lines instead of one dense row.
+        - Emoji icons (💰/⚔️) didn't render at all in this headless
+          Chromium (no emoji font installed) — replaced with plain text
+          labels ("Gold"/"Legions"), which is more robust across
+          environments regardless of the cause.
+        - `MapView.setSelected` was wiping ownership colors back to
+          "unclaimed" while picking a home province mid-game; `loadReplay()`
+          dropped `target_province`/`target_faction` when mapping REST
+          events, so a replayed game's log never showed what an action
+          targeted.
+        - **The most significant one**: watching a live game, the map
+          stayed completely gray through all of round 1 even though the
+          event log updated normally — `game/run_game.py` only wrote
+          `FactionStateSnapshot` rows (what map coloring reads) once a full
+          round completed, not per action. Fixed by upserting a snapshot
+          for every faction after every action instead, keyed on the
+          event's round number (constant through a round) rather than
+          `state["turn"]` (which only advances at the round boundary — using
+          it would've given a round's earlier actions a different, stale
+          key than its last one). That fix surfaced a second, subtler bug
+          while writing its test: `play_game`'s `on_event` callback (what
+          `backend/`'s WebSocket broadcast is built on) fired *before* the
+          corresponding DB write committed, not after — a client reacting
+          to a live broadcast with an immediate REST call could race the
+          still-in-flight commit and read stale data, on every single
+          update, not just during round 1. Reordered so `on_event` only
+          fires once its transaction has committed. Both confirmed live: a
+          screenshot taken ~4s after a game started showed both factions'
+          territory correctly colored on the map while `current_turn` was
+          still 0 (round 1 in progress).
 - [ ] Phase 6 — eval + annotation
 
 ## Non-goals

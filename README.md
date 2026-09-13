@@ -36,6 +36,18 @@ doesn't persist anything, useful for a quick check without a database
 configured. With the backend running, `GET /docs` has the interactive API
 reference (FastAPI's auto-generated Swagger UI).
 
+### Frontend
+
+```bash
+cd frontend
+npm install
+cp .env.example .env   # only needed if the backend isn't on localhost:8000
+npm run dev            # http://localhost:5173 — needs the backend running too
+```
+
+Build a scenario (add factions, click the map to set each one's home
+province), save it, then start a game from it and watch it play live.
+
 ## Phase status
 
 - [x] Phase 0 — project scaffolding
@@ -43,9 +55,7 @@ reference (FastAPI's auto-generated Swagger UI).
 - [x] Phase 2 — multi-agent coordination (`agents/`)
 - [x] Phase 3 — map/geo generation (`map_data/`)
 - [x] Phase 4 — connect agents to the map (`agents/`, `game/`)
-- [~] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
-      — game loop + Postgres persistence + FastAPI/WebSocket backend done;
-      frontend and scenario-editor UI not started
+- [x] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
 - [ ] Phase 6 — eval + annotation (`eval/`)
 
 See `claude.md` for what each phase covers and the "Progress log" for what's
