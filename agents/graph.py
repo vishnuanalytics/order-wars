@@ -18,6 +18,8 @@ pure/LLM-free and independently tested.
 
 import os
 import random
+import threading
+from collections.abc import Callable
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -44,6 +46,27 @@ from game.rules import (
 from map_data.loader import distance_between, get_province, name_of, neighbors_of, sea_neighbors_of
 
 INTENT_REFRESH_INTERVAL = 3
+
+# A human take-over hook (`backend/`'s live-play feature): given a faction
+# id, returns a human-submitted FactionAction if that faction is currently
+# human-controlled and one arrived in time, or None to let the AI decide as
+# usual (not human-controlled, or the human timed out). Set per-thread, not
+# globally — `backend/game_hub.py`'s GameHub already runs every game's
+# `play_game()` call on its own dedicated background thread, so a plain
+# `threading.local()` isolates one game's provider from another's without
+# threading a new parameter through every LangGraph node or coupling this
+# module to `backend/` (agents/ stays usable standalone, e.g. `python -m
+# agents.graph`, where no provider is ever set and this is always a no-op).
+HumanActionProvider = Callable[[str], FactionAction | None]
+_human_action_context = threading.local()
+
+
+def set_human_action_provider(provider: HumanActionProvider | None) -> None:
+    _human_action_context.provider = provider
+
+
+def _get_human_action_provider() -> HumanActionProvider | None:
+    return getattr(_human_action_context, "provider", None)
 
 
 def _other_faction_ids(state: GameState, faction_id: str) -> list[str]:
@@ -400,7 +423,15 @@ def faction_turn(state: GameState) -> dict:
     state = {**state, "factions": {**state["factions"], faction_id: faction}}
 
     move_targets = _legal_move_targets(state, faction_id)
-    action, specialist = _decide_action(state, faction_id, move_targets)
+    provider = _get_human_action_provider()
+    human_action = provider(faction_id) if provider else None
+    if human_action is not None:
+        action, specialist = human_action, "human"
+    else:
+        action, specialist = _decide_action(state, faction_id, move_targets)
+    # Same sanitize/resolve path either way — a human can't submit anything
+    # the AI couldn't also have (illegally) attempted, and isn't restricted
+    # to whichever specialist the dispatcher would have picked this turn.
     action = _sanitize_action(state, faction_id, action, move_targets)
 
     resolved = resolve_action(state, faction_id, action)

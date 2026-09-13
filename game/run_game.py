@@ -29,7 +29,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from agents.graph import DEMO_FACTIONS, build_graph, initial_state_for, require_llm_configured
+from agents.graph import (
+    DEMO_FACTIONS,
+    HumanActionProvider,
+    build_graph,
+    initial_state_for,
+    require_llm_configured,
+    set_human_action_provider,
+)
 from agents.state import GameState
 from db.models import (
     DiplomaticRelation,
@@ -231,6 +238,7 @@ def play_game(
     max_turns: int = 10,
     session_factory: sessionmaker[Session] | None = None,
     on_event: Callable[[GameState], None] | None = None,
+    human_action_provider: HumanActionProvider | None = None,
 ) -> GameState:
     """Slow half: the actual LLM-driven turn loop, persisting as it goes.
 
@@ -239,6 +247,13 @@ def play_game(
     broadcast live updates over WebSocket. Runs synchronously/blocking on
     whatever thread calls it; `backend/` is responsible for putting that on
     a background thread, not this function.
+
+    `human_action_provider`, if given, lets a live viewer take over a
+    faction's turns (`backend/`'s live-play feature) — see
+    `agents.graph.set_human_action_provider`'s docstring for why this is
+    injected as a plain callable rather than `game/` importing anything
+    from `backend/` (it stays optional and unused by the CLI/tests, which
+    never pass one).
 
     On any exception (no LLM key configured, a DB error, ...), marks the
     `Game` row `FAILED` (instead of leaving it stuck at `RUNNING` forever)
@@ -249,7 +264,8 @@ def play_game(
     session_factory = session_factory or get_sessionmaker()
     try:
         return _play_game(
-            game_id, faction_configs, db_faction_id, max_turns, session_factory, on_event
+            game_id, faction_configs, db_faction_id, max_turns, session_factory, on_event,
+            human_action_provider,
         )
     except Exception:
         logger.exception("Game %s failed", game_id)
@@ -283,6 +299,7 @@ def _play_game(
     max_turns: int,
     session_factory: sessionmaker[Session],
     on_event: Callable[[GameState], None] | None,
+    human_action_provider: HumanActionProvider | None = None,
 ) -> GameState:
     require_llm_configured()
 
@@ -290,6 +307,28 @@ def _play_game(
     graph = build_graph()
     config = {"recursion_limit": max_turns * len(faction_configs) + 10}
 
+    # Set for the duration of this game's turn loop only, on whatever
+    # thread is calling us (see agents.graph.set_human_action_provider) —
+    # cleared in the `finally` below so a thread pool reusing this OS
+    # thread for another game later doesn't inherit a stale provider.
+    set_human_action_provider(human_action_provider)
+    try:
+        return _run_turn_loop(
+            game_id, db_faction_id, session_factory, on_event, graph, initial_state, config
+        )
+    finally:
+        set_human_action_provider(None)
+
+
+def _run_turn_loop(
+    game_id: uuid.UUID,
+    db_faction_id: dict[str, uuid.UUID],
+    session_factory: sessionmaker[Session],
+    on_event: Callable[[GameState], None] | None,
+    graph,
+    initial_state: GameState,
+    config: dict,
+) -> GameState:
     prev_diplomatic_status: dict[str, str] = {}
     final_state = initial_state
     winner_faction_id: str | None = None

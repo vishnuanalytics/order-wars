@@ -10,6 +10,7 @@ background thread via `backend.game_hub.hub` so the request doesn't block;
 
 import asyncio
 import os
+import queue
 import uuid
 from collections import defaultdict
 
@@ -17,8 +18,10 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
+from agents.actions import FactionAction
 from backend.game_hub import hub
 from backend.schemas import (
     AdHocFactionIn,
@@ -75,6 +78,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# How long a human-controlled faction's turn waits for a submitted action
+# before falling back to the AI for that one turn — see
+# backend/game_hub.py's await_human_action. Chosen to be long enough for a
+# real person to read the board and decide, short enough that an abandoned
+# tab doesn't stall a spectated game for long.
+HUMAN_ACTION_TIMEOUT_SECONDS = 45
 
 
 def _default_session_factory() -> sessionmaker[Session]:
@@ -186,6 +196,12 @@ def start_game(
         # input that had nothing to do with a missing scenario.
         raise HTTPException(422, str(exc)) from exc
 
+    # Lets the live WebSocket handler translate a submitted action's own
+    # target_faction (e.g. who to declare_war on) from the DB id the
+    # frontend sends into agents/graph's internal slug — see
+    # GameHub.slug_for and _handle_live_control_message.
+    hub.register_factions(str(game_id), {str(v): k for k, v in db_faction_id.items()})
+
     def _on_event(state: dict) -> None:
         hub.broadcast(
             str(game_id),
@@ -197,6 +213,21 @@ def start_game(
             },
         )
 
+    # Live-play: lets a WebSocket client take over a faction's turns (see
+    # backend/game_hub.py's control-plane methods and
+    # agents.graph.set_human_action_provider). `faction_slug` is whatever
+    # agents/graph.py's turn loop uses internally (e.g. "rome") — GameHub
+    # itself tracks control keyed by the DB faction id instead, matching
+    # every other faction reference the frontend already uses, so this is
+    # the one place that needs to translate between the two id spaces.
+    def _human_action_provider(faction_slug: str) -> FactionAction | None:
+        faction_db_id = str(db_faction_id[faction_slug])
+        if not hub.is_human_controlled(str(game_id), faction_db_id):
+            return None
+        return hub.await_human_action(
+            str(game_id), faction_db_id, timeout=HUMAN_ACTION_TIMEOUT_SECONDS
+        )
+
     def _play() -> None:
         play_game(
             game_id,
@@ -205,6 +236,7 @@ def start_game(
             payload.max_turns,
             session_factory=session_factory,
             on_event=_on_event,
+            human_action_provider=_human_action_provider,
         )
 
     hub.start(str(game_id), _play)
@@ -390,22 +422,111 @@ def create_annotation(
     return annotation
 
 
+def _queue_get_or_none(q: queue.Queue, timeout: float):
+    try:
+        return q.get(timeout=timeout)
+    except queue.Empty:
+        return None
+
+
+def _handle_live_control_message(game_id: str, data: dict) -> None:
+    """A client taking control of a faction, releasing it, or submitting an
+    action for their turn — the only messages this endpoint ever receives;
+    everything else is server -> client only. `faction_id` throughout is
+    the DB faction id (a string uuid), matching every other faction
+    reference the frontend already uses — see start_game's
+    _human_action_provider for where that gets translated to agents/'s
+    internal slug id space.
+    """
+    message_type = data.get("type")
+    faction_id = data.get("faction_id")
+    if not faction_id:
+        return
+
+    if message_type == "take_control":
+        hub.take_control(game_id, faction_id)
+        hub.broadcast(game_id, {"type": "control_changed", "faction_id": faction_id, "human_controlled": True})
+    elif message_type == "release_control":
+        hub.release_control(game_id, faction_id)
+        hub.broadcast(game_id, {"type": "control_changed", "faction_id": faction_id, "human_controlled": False})
+    elif message_type == "submit_action":
+        try:
+            action = FactionAction(**(data.get("action") or {}))
+        except ValidationError:
+            return  # malformed submission from a client — dropped, not a server error
+        if action.target_faction:
+            # The client only ever knows other factions by DB id (same as
+            # everywhere else in the UI) — translate to the slug
+            # agents/graph.py's resolve_action/_sanitize_action expect. An
+            # unknown id (e.g. register_factions hasn't run yet, or a bogus
+            # value) is left as-is and simply fails sanitization the same
+            # way an AI hallucinating a bad target would — no special case
+            # needed here.
+            slug = hub.slug_for(game_id, action.target_faction)
+            if slug is not None:
+                action = action.model_copy(update={"target_faction": slug})
+        hub.submit_action(game_id, faction_id, action)
+
+
 @app.websocket("/games/{game_id}/live")
 async def game_live(websocket: WebSocket, game_id: str) -> None:
     """Streams `{"type": "state", ...}` messages as the game plays, then a
     final `{"type": "stream_end"}` (or `{"type": "error", ...}` first, if
     `play_game` raised). Subscribing to a game id nothing is currently
     playing just waits — it's not an error, the game may start later.
+
+    Also accepts messages from the client (see _handle_live_control_message)
+    — this is the live-play control channel, so unlike every other endpoint
+    here this one is genuinely bidirectional. Sending and receiving run as
+    two concurrent tasks since Starlette's WebSocket has no single call that
+    does both; whichever finishes first (normally the receiver, on
+    disconnect) ends the connection.
     """
     await websocket.accept()
     subscription = hub.subscribe(game_id)
-    try:
+    # A client joining after control was already claimed has no other way
+    # to learn that — GameHub keeps no broadcast backlog (see subscribe's
+    # docstring precedent for the same limitation on game state itself) —
+    # so send a snapshot of current control state right away.
+    await websocket.send_json(
+        {"type": "control_state", "controlled_factions": sorted(hub.controlled_factions(game_id))}
+    )
+
+    async def _forward_broadcasts() -> None:
+        # A bounded queue.get, not a bare blocking one: asyncio.to_thread
+        # hands the call to a thread-pool worker, and cancelling the
+        # awaiting Task does NOT interrupt an already-running executor
+        # call — a subscriber that never receives anything (e.g. it
+        # connected after the game already finished and was forgotten;
+        # GameHub keeps no backlog) would otherwise block this forever,
+        # and the `finally` below's cleanup would hang waiting for it to
+        # resolve. Polling with a short timeout instead means a cancelled
+        # task actually unblocks within one poll interval. Caught by a new
+        # test hanging, not by inspection.
         while True:
-            message = await asyncio.to_thread(subscription.get)
+            message = await asyncio.to_thread(_queue_get_or_none, subscription, 0.5)
+            if message is None:
+                continue
             await websocket.send_json(message)
             if message.get("type") in ("stream_end", "error"):
                 break
+
+    async def _receive_control_messages() -> None:
+        try:
+            while True:
+                data = await websocket.receive_json()
+                _handle_live_control_message(game_id, data)
+        except WebSocketDisconnect:
+            pass
+
+    forward_task = asyncio.create_task(_forward_broadcasts())
+    receive_task = asyncio.create_task(_receive_control_messages())
+    try:
+        await asyncio.wait({forward_task, receive_task}, return_when=asyncio.FIRST_COMPLETED)
     except WebSocketDisconnect:
         pass
     finally:
+        for task in (forward_task, receive_task):
+            task.cancel()
+        await asyncio.gather(forward_task, receive_task, return_exceptions=True)
         hub.unsubscribe(game_id, subscription)

@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 
+from agents.actions import FactionAction
 from backend.game_hub import GameHub
 
 
@@ -123,3 +124,80 @@ def test_a_current_subscriber_still_gets_stream_end_despite_cleanup():
     hub.start("game-1", lambda: None)
 
     assert q.get(timeout=1) == {"type": "stream_end"}
+
+
+# --- Live-play control plane -------------------------------------------
+
+
+def test_take_control_marks_a_faction_human_controlled():
+    hub = GameHub()
+    assert hub.is_human_controlled("game-1", "rome") is False
+
+    hub.take_control("game-1", "rome")
+
+    assert hub.is_human_controlled("game-1", "rome") is True
+    assert hub.controlled_factions("game-1") == {"rome"}
+
+
+def test_release_control_reverts_to_ai():
+    hub = GameHub()
+    hub.take_control("game-1", "rome")
+
+    hub.release_control("game-1", "rome")
+
+    assert hub.is_human_controlled("game-1", "rome") is False
+
+
+def test_control_is_scoped_per_game_and_per_faction():
+    hub = GameHub()
+    hub.take_control("game-1", "rome")
+
+    assert hub.is_human_controlled("game-1", "carthage") is False
+    assert hub.is_human_controlled("game-2", "rome") is False
+
+
+def test_submit_action_then_await_returns_it_immediately():
+    hub = GameHub()
+    action = FactionAction(action_type="hold", rationale="testing")
+
+    hub.submit_action("game-1", "rome", action)
+
+    assert hub.await_human_action("game-1", "rome", timeout=1) == action
+
+
+def test_await_human_action_returns_none_on_timeout():
+    hub = GameHub()
+    assert hub.await_human_action("game-1", "rome", timeout=0.05) is None
+
+
+def test_forget_clears_control_state_and_pending_action_queues():
+    hub = GameHub()
+    hub.take_control("game-1", "rome")
+    hub.submit_action("game-1", "rome", FactionAction(action_type="hold", rationale="x"))
+
+    hub._forget("game-1")
+
+    assert hub.is_human_controlled("game-1", "rome") is False
+    assert ("game-1", "rome") not in hub._action_queues
+
+
+def test_register_factions_then_slug_for_translates_db_id_to_slug():
+    hub = GameHub()
+    hub.register_factions("game-1", {"uuid-rome": "rome", "uuid-carthage": "carthage"})
+
+    assert hub.slug_for("game-1", "uuid-rome") == "rome"
+    assert hub.slug_for("game-1", "uuid-carthage") == "carthage"
+
+
+def test_slug_for_returns_none_for_an_unregistered_id():
+    hub = GameHub()
+    assert hub.slug_for("game-1", "no-such-id") is None
+
+
+def test_forget_clears_registered_faction_slugs():
+    hub = GameHub()
+    hub.register_factions("game-1", {"uuid-rome": "rome"})
+
+    hub._forget("game-1")
+
+    assert hub.slug_for("game-1", "uuid-rome") is None

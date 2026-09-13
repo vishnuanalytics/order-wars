@@ -567,3 +567,145 @@ def test_websocket_receives_live_updates_then_stream_end(client, monkeypatch):
 
     assert messages[-1] == {"type": "stream_end"}
     assert any(m["type"] == "state" for m in messages)
+
+
+def test_websocket_sends_initial_control_state_snapshot(client):
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+
+    with client.websocket_connect(f"/games/{game_id}/live") as ws:
+        first = ws.receive_json()
+
+    assert first == {"type": "control_state", "controlled_factions": []}
+
+
+def test_handle_live_control_message_take_and_release_control():
+    from backend.main import _handle_live_control_message
+
+    hub._human_controlled.pop("game-x", None)
+    _handle_live_control_message("game-x", {"type": "take_control", "faction_id": "f1"})
+    assert hub.is_human_controlled("game-x", "f1") is True
+
+    _handle_live_control_message("game-x", {"type": "release_control", "faction_id": "f1"})
+    assert hub.is_human_controlled("game-x", "f1") is False
+
+
+def test_handle_live_control_message_submit_action_parses_and_queues_it():
+    from backend.main import _handle_live_control_message
+
+    _handle_live_control_message(
+        "game-y",
+        {"type": "submit_action", "faction_id": "f1", "action": {"action_type": "hold", "rationale": "human pick"}},
+    )
+
+    action = hub.await_human_action("game-y", "f1", timeout=1)
+    assert action.action_type == "hold"
+    assert action.rationale == "human pick"
+
+
+def test_handle_live_control_message_translates_target_faction_to_slug():
+    from backend.main import _handle_live_control_message
+
+    hub.register_factions("game-w", {"carthage-uuid": "carthage"})
+    _handle_live_control_message(
+        "game-w",
+        {
+            "type": "submit_action",
+            "faction_id": "f1",
+            "action": {"action_type": "declare_war", "target_faction": "carthage-uuid", "rationale": "test"},
+        },
+    )
+
+    action = hub.await_human_action("game-w", "f1", timeout=1)
+    assert action.target_faction == "carthage"
+
+
+def test_handle_live_control_message_drops_a_malformed_submission():
+    from backend.main import _handle_live_control_message
+
+    # "declare_war" without target_faction fails FactionAction's own
+    # validation — this must be silently dropped, not raise, since a
+    # malformed client message is not a server error.
+    _handle_live_control_message(
+        "game-z", {"type": "submit_action", "faction_id": "f1", "action": {"action_type": "not_a_real_type"}}
+    )
+
+    assert hub.await_human_action("game-z", "f1", timeout=0.05) is None
+
+
+def test_human_takes_control_and_their_submitted_action_is_applied(client, monkeypatch):
+    """End-to-end over the real WebSocket wire protocol: a human sends
+    take_control then submit_action as actual messages (exercising
+    _handle_live_control_message's parsing too, not just GameHub directly),
+    and the resulting persisted GameEvent reflects exactly what they chose,
+    tagged specialist="human" — not whatever the AI would have picked.
+
+    Targets Carthage, not Rome: turn_order is [Rome, Carthage], and the
+    human-controlled check for whoever acts *first* happens essentially
+    instantly (before any LLM call, slow or not) — there's no natural
+    window to get a take_control message there in time. Carthage acts only
+    after Rome's own turn (AI-decided here, consuming the slow fake LLM's
+    sleep) has fully elapsed, which is exactly the margin this test needs.
+    A first version of this test targeted Rome and was consistently too
+    late, not flaky — caught by a real assertion failure, not a hang.
+
+    Real-threading/slow-LLM technique borrowed from
+    test_websocket_receives_live_updates_then_stream_end, with the
+    websocket opened immediately after the game starts (before the extra
+    GET-for-faction-id round trip) — GameHub keeps no backlog for a
+    subscriber or control message that arrives after a fast game has
+    already finished (an earlier version raced exactly that and hung; see
+    _forward_broadcasts' bounded-poll fix in backend/main.py, a real bug
+    that test surfaced, not just a test issue).
+    """
+    import time
+    from backend.game_hub import GameHub
+
+    monkeypatch.setattr(hub, "start", GameHub.start.__get__(hub, GameHub))
+
+    class _SlowHoldLLM:
+        def __init__(self, *a, **k):
+            pass
+
+        def invoke(self, prompt):
+            time.sleep(0.3)
+            return FactionAction(action_type="hold", rationale="AI would have picked this")
+
+    monkeypatch.setattr(
+        graph_module,
+        "build_llm",
+        lambda max_tokens=64, schema=None: (_SlowHoldLLM() if schema is not None else _FakeIntentLLM()),
+    )
+
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+
+    with client.websocket_connect(f"/games/{game_id}/live") as ws:
+        control_state = ws.receive_json()
+        assert control_state == {"type": "control_state", "controlled_factions": []}
+
+        carthage_id = next(
+            f["id"] for f in client.get(f"/games/{game_id}").json()["factions"] if f["faction_name"] == "Carthage"
+        )
+        ws.send_json({"type": "take_control", "faction_id": carthage_id})
+        ws.send_json(
+            {
+                "type": "submit_action",
+                "faction_id": carthage_id,
+                "action": {"action_type": "hold", "rationale": "the human chose this"},
+            }
+        )
+
+        messages = []
+        while True:
+            message = ws.receive_json()
+            messages.append(message)
+            if message["type"] in ("stream_end", "error"):
+                break
+
+    assert any(
+        m == {"type": "control_changed", "faction_id": carthage_id, "human_controlled": True} for m in messages
+    )
+
+    events = client.get(f"/games/{game_id}/events").json()
+    carthage_event = next(e for e in events if e["faction_id"] == carthage_id)
+    assert carthage_event["payload"]["rationale"] == "the human chose this"
+    assert carthage_event["payload"]["specialist"] == "human"

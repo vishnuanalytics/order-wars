@@ -4,10 +4,12 @@ from agents import graph as graph_module
 from agents.actions import FactionAction, MilitaryAction
 from agents.graph import (
     _dispatch_specialist,
+    _get_human_action_provider,
     _sanitize_action,
     build_graph,
     faction_turn,
     route_after_turn,
+    set_human_action_provider,
 )
 from agents.state import FactionState, GameState
 from game.rules import pair_key
@@ -135,6 +137,63 @@ def test_faction_turn_sanitizes_illegal_move_to_hold(monkeypatch):
     assert carthage["last_action"]["action_type"] == "hold"
     assert "sanitized to hold" in carthage["last_action"]["rationale"]
     assert ROME_NEIGHBOR not in update["province_owner"]  # never applied
+
+
+def test_faction_turn_uses_a_human_submitted_action_when_provider_returns_one(monkeypatch):
+    """A human action skips _dispatch_specialist and the specialist's own
+    LLM call entirely — the periodic leader-layer intent refresh is
+    unrelated to who executes this turn's action and still runs normally,
+    so build_llm is only made to explode for the schema-bound (specialist)
+    call, not the plain intent-refresh one.
+    """
+    def _dispatch_explode(*a, **k):
+        raise AssertionError("_dispatch_specialist should not run when a human action is provided")
+
+    def _build_llm_no_specialist(max_tokens=64, schema=None):
+        if schema is not None:
+            raise AssertionError("a specialist LLM call should not run when a human action is provided")
+        return _FakeIntentLLM()
+
+    monkeypatch.setattr(graph_module, "_dispatch_specialist", _dispatch_explode)
+    monkeypatch.setattr(graph_module, "build_llm", _build_llm_no_specialist)
+    human_action = FactionAction(action_type="hold", rationale="a human decided this")
+    set_human_action_provider(lambda faction_id: human_action)
+    try:
+        state = _state(
+            {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+            {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+        )
+        update = faction_turn(state)
+    finally:
+        set_human_action_provider(None)
+
+    rome = update["factions"]["rome"]
+    assert rome["last_action"]["rationale"] == "a human decided this"
+    assert "[human]" in update["log"][0]
+
+
+def test_faction_turn_falls_back_to_ai_when_provider_returns_none(monkeypatch):
+    """A provider is set (e.g. the faction isn't human-controlled, or a
+    human-controlled faction's turn timed out) but returns None — the AI
+    path must still run normally.
+    """
+    monkeypatch.setattr(graph_module, "build_llm", _fake_build_llm)
+    _force_specialist(monkeypatch, "military")
+    set_human_action_provider(lambda faction_id: None)
+    try:
+        state = _state(
+            {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+            {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+        )
+        update = faction_turn(state)
+    finally:
+        set_human_action_provider(None)
+
+    assert "[military]" in update["log"][0]
+
+
+def test_human_action_provider_defaults_to_none():
+    assert _get_human_action_provider() is None
 
 
 def test_sanitize_action_allows_a_known_unit_type():

@@ -271,6 +271,37 @@ def test_play_game_calls_on_event_for_every_yielded_state(sqlite_sessionmaker):
     assert seen[1]["last_event"]["faction_id"] == "a"
 
 
+def test_play_game_wires_the_human_action_provider_for_the_turn_loop(sqlite_sessionmaker):
+    """agents.graph.faction_turn reads whatever provider is currently set
+    via _get_human_action_provider — play_game is responsible for setting
+    it before the graph runs and clearing it afterward (see
+    set_human_action_provider's docstring on why this is thread-local
+    rather than passed through every node).
+    """
+    seen_during_run = []
+
+    def _provider(faction_id):
+        seen_during_run.append(graph_module._get_human_action_provider())
+        return None  # let the AI decide, same as "not human-controlled"
+
+    game_id, faction_configs, db_faction_id = create_game(
+        FACTION_CONFIGS, max_turns=10, session_factory=sqlite_sessionmaker
+    )
+    assert graph_module._get_human_action_provider() is None  # nothing set before the call
+
+    play_game(
+        game_id, faction_configs, db_faction_id, max_turns=10,
+        session_factory=sqlite_sessionmaker, human_action_provider=_provider,
+    )
+
+    # faction_turn actually called our provider (proves the wiring reaches
+    # the node, not just that play_game accepted the parameter) ...
+    assert len(seen_during_run) > 0
+    # ... and it's cleared afterward, so a later game on a reused thread
+    # doesn't inherit a stale provider.
+    assert graph_module._get_human_action_provider() is None
+
+
 def test_load_faction_configs_from_scenario(sqlite_sessionmaker):
     with sqlite_sessionmaker() as session:
         scenario = Scenario(name="Test Scenario", max_turns=5)

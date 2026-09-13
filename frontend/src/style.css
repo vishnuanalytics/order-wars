@@ -405,6 +405,85 @@ form input[type="number"] {
   transition: width 0.6s ease;
 }
 
+.faction-row-header {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.human-controlled-badge {
+  font-size: 0.72rem;
+  background: #e8f0fe;
+  color: var(--accent);
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.control-toggle-button {
+  flex-basis: 100%;
+  margin: 0.3rem 0 0 1.2rem;
+  width: fit-content;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.75rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.control-toggle-button.take {
+  background: #fff;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+.control-toggle-button.release {
+  background: #fff;
+  border: 1px solid var(--text-muted);
+  color: var(--text-muted);
+}
+
+.action-form {
+  flex-basis: 100%;
+  margin: 0.4rem 0 0.5rem 1.2rem;
+  padding: 0.5rem;
+  background: #eef6ff;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: 0.76rem;
+}
+.action-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  flex: 1 1 8rem;
+}
+.action-form select,
+.action-form input {
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.76rem;
+}
+.action-field-rationale {
+  flex-basis: 100% !important;
+}
+.action-form button[type="submit"] {
+  flex-basis: 100%;
+  padding: 0.3rem;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.action-form .hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.68rem;
+}
+
 .diplomacy-panel {
   margin-top: 0.6rem;
 }
