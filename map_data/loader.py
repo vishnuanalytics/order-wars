@@ -21,8 +21,11 @@ class Province:
     name: str
     country: str
     neighbors: tuple[str, ...]
+    sea_neighbors: tuple[str, ...]
+    terrain: str
     centroid_lon: float
     centroid_lat: float
+    land_frac: float
 
 
 @lru_cache(maxsize=1)
@@ -37,8 +40,11 @@ def _load() -> dict[str, Province]:
             name=props["name"],
             country=props["country"],
             neighbors=tuple(props["neighbors"]),
+            sea_neighbors=tuple(props["sea_neighbors"]),
+            terrain=props["terrain"],
             centroid_lon=props["centroid_lon"],
             centroid_lat=props["centroid_lat"],
+            land_frac=props["land_frac"],
         )
     return provinces
 
@@ -50,6 +56,13 @@ def get_province(province_id: str) -> Province | None:
 def neighbors_of(province_id: str) -> tuple[str, ...]:
     province = get_province(province_id)
     return province.neighbors if province else ()
+
+
+def sea_neighbors_of(province_id: str) -> tuple[str, ...]:
+    """Short cross-water move_army lanes — see generate_map.py's
+    `_compute_sea_neighbors` for how these are computed and calibrated."""
+    province = get_province(province_id)
+    return province.sea_neighbors if province else ()
 
 
 def province_ids_in_country(country: str) -> list[str]:

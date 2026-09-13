@@ -32,6 +32,14 @@ Pipeline:
      later without touching this pipeline.
   5. Compute land-adjacency (H3 grid neighbors, intersected with the actual
      kept province set) and write everything to provinces.geojson.
+  6. Classify each province's `terrain` (coastal/hills/plains) and compute
+     `sea_neighbors` — short cross-water `move_army` lanes between coastal
+     provinces that aren't already land-adjacent (e.g. Carthage <-> Sicily).
+     Terrain is a gameplay-flavor proxy derived from data already computed
+     above (land_frac + H3 adjacency gaps), not real elevation/coastline
+     data — see `_classify_terrain`/`_compute_sea_neighbors` for exact
+     rules and CLAUDE.md's Progress Log for how the thresholds/distance
+     cutoff were calibrated against this map's actual geometry.
 
 Each province's geometry is the full hexagon (not clipped to the coastline)
 — a deliberate hex-grid-game look (Civ-style), not a realistic coastline map.
@@ -44,8 +52,8 @@ from urllib.request import urlretrieve
 
 import geopandas as gpd
 import h3
-from shapely.geometry import Polygon
-from shapely.ops import unary_union
+from shapely.geometry import LineString, Polygon
+from shapely.ops import substring, unary_union
 
 MAP_DATA_DIR = Path(__file__).parent
 RAW_DIR = MAP_DATA_DIR / "raw"
@@ -180,6 +188,139 @@ def _compute_neighbors(hexes: gpd.GeoDataFrame) -> dict[str, list[str]]:
     }
 
 
+def _real_water_gaps(hexes: gpd.GeoDataFrame, bbox) -> dict[str, set[str]]:
+    """For each kept hex, which of its H3 neighbors are missing because they
+    were tiled and then dropped for insufficient land (a real water gap) —
+    as opposed to missing only because they fall outside the generation
+    bbox (a clipping artifact, not water). Distinguishing the two matters:
+    ~44 provinces near this map's northern bbox edge would otherwise be
+    misclassified as coastal purely because land north of the bbox was
+    clipped away before tiling, not because they border open sea.
+    """
+    from shapely.geometry import Point, box
+
+    region = box(*bbox)
+    kept_ids = set(hexes.index)
+    gaps: dict[str, set[str]] = {}
+    for h3_id in hexes.index:
+        missing = set(h3.grid_disk(h3_id, 1)) - {h3_id} - kept_ids
+        gaps[h3_id] = {
+            m for m in missing
+            if region.contains(Point(*reversed(h3.cell_to_latlng(m))))
+        }
+    return gaps
+
+
+def _classify_terrain(hexes: gpd.GeoDataFrame, bbox) -> tuple[dict[str, str], dict[str, bool]]:
+    """Gameplay-flavor `terrain` per province, derived only from data this
+    pipeline already computes (land_frac, H3 adjacency) — no new Natural
+    Earth layers (elevation/bathymetry) are downloaded for this.
+
+    `is_coastal` (also returned, for `_compute_sea_neighbors` to reuse) is
+    true if a province borders real open water (`_real_water_gaps`) OR is
+    mostly water itself despite being topologically land-ringed at this hex
+    resolution (land_frac < 0.5) — e.g. small islands/gulfs fully encircled
+    by land hexes at ~69km resolution. Remaining provinces are `plains`
+    (land_frac >= 0.9) or `hills` (the partial-water minority in between);
+    the 0.9 cutoff was chosen empirically since non-coastal hexes in this
+    map cluster overwhelmingly at land_frac == 1.0.
+    """
+    gaps = _real_water_gaps(hexes, bbox)
+    terrain: dict[str, str] = {}
+    is_coastal: dict[str, bool] = {}
+    for h3_id, land_frac in hexes["land_frac"].items():
+        coastal = bool(gaps[h3_id]) or land_frac < 0.5
+        is_coastal[h3_id] = coastal
+        if coastal:
+            terrain[h3_id] = "coastal"
+        elif land_frac >= 0.9:
+            terrain[h3_id] = "plains"
+        else:
+            terrain[h3_id] = "hills"
+    return terrain, is_coastal
+
+
+# Naval-lane tuning constants — calibrated against this map's real geometry
+# (see CLAUDE.md Progress Log), not chosen arbitrarily.
+MAX_SEA_CROSSING_M = 400_000  # centroid-to-centroid cap; includes Sicily<->Tunisia
+SEA_LANE_TRIM_M = 30_000  # trimmed off each end of the crossing line before testing
+SEA_LANE_TOP_K = 3  # nearest candidates kept per province before symmetrizing
+
+
+def _compute_sea_neighbors(
+    hexes: gpd.GeoDataFrame,
+    is_coastal: dict[str, bool],
+    neighbors: dict[str, list[str]],
+    land_union,
+) -> dict[str, list[str]]:
+    """Short cross-water `move_army` lanes between coastal provinces that
+    aren't already land-adjacent.
+
+    Candidate pairs are filtered by centroid distance (in the pipeline's
+    existing equal-area CRS) and by a trimmed-line-vs-land check: both
+    centroids sit inside land by construction, so testing the raw
+    centroid-to-centroid line against the real land polygon rejects real
+    open-water crossings too (confirmed against real Adriatic/Ionian
+    pairs) — trimming `min(SEA_LANE_TRIM_M, 30% of length)` off each end
+    before testing the remaining "core" segment fixes this. Each province
+    keeps its nearest `SEA_LANE_TOP_K` candidates, then the result is
+    symmetrized by union (if A picks B, the edge exists even if B's own
+    top-K didn't independently pick A) — so a few real chokepoints can end
+    up with more than `SEA_LANE_TOP_K` lanes, which is expected, not a bug.
+    Any coastal province left with zero lanes after this falls back to a
+    guaranteed connection to its single nearest coastal province, so no
+    coastal province is ever fully unreachable by sea.
+    """
+    coastal_ids = [h3_id for h3_id in hexes.index if is_coastal.get(h3_id, False)]
+    result: dict[str, set[str]] = {h3_id: set() for h3_id in hexes.index}
+    if not coastal_ids:
+        return {h3_id: [] for h3_id in hexes.index}
+
+    centroids_proj = hexes.geometry.to_crs(_LAEA_CRS).centroid
+    land_proj = gpd.GeoSeries([land_union], crs="EPSG:4326").to_crs(_LAEA_CRS).iloc[0]
+
+    candidates: dict[str, list[tuple[str, float]]] = {h3_id: [] for h3_id in coastal_ids}
+    for i, a in enumerate(coastal_ids):
+        point_a = centroids_proj[a]
+        for b in coastal_ids[i + 1:]:
+            if b in neighbors.get(a, ()):
+                continue  # already land-adjacent, no lane needed
+            point_b = centroids_proj[b]
+            distance = point_a.distance(point_b)
+            if distance > MAX_SEA_CROSSING_M:
+                continue
+            trim = min(SEA_LANE_TRIM_M, distance * 0.3)
+            core = substring(LineString([point_a, point_b]), trim, distance - trim)
+            if core.length <= 0 or core.intersects(land_proj):
+                continue
+            candidates[a].append((b, distance))
+            candidates[b].append((a, distance))
+
+    for h3_id, cands in candidates.items():
+        for other, _distance in sorted(cands, key=lambda pair: pair[1])[:SEA_LANE_TOP_K]:
+            result[h3_id].add(other)
+            result[other].add(h3_id)
+
+    for h3_id in coastal_ids:
+        if result[h3_id]:
+            continue
+        point_a = centroids_proj[h3_id]
+        already_adjacent = set(neighbors.get(h3_id, ()))
+        nearest = min(
+            (
+                other for other in coastal_ids
+                if other != h3_id and other not in already_adjacent
+            ),
+            key=lambda other: point_a.distance(centroids_proj[other]),
+            default=None,
+        )
+        if nearest is not None:
+            result[h3_id].add(nearest)
+            result[nearest].add(h3_id)
+
+    return {h3_id: sorted(others) for h3_id, others in result.items()}
+
+
 def generate(
     bbox=DEFAULT_BBOX,
     resolution: int = DEFAULT_RESOLUTION,
@@ -193,16 +334,20 @@ def generate(
     hexes = _hex_cells(land_union, resolution, min_land_frac)
     hexes = _name_provinces(hexes, countries)
     neighbors = _compute_neighbors(hexes)
+    terrain, is_coastal = _classify_terrain(hexes, bbox)
+    sea_neighbors = _compute_sea_neighbors(hexes, is_coastal, neighbors, land_union)
 
     centroids = _centroids_lonlat(hexes)
     hexes = hexes.reset_index().rename(columns={"h3_id": "province_id"})
     hexes["neighbors"] = hexes["province_id"].map(neighbors)
+    hexes["sea_neighbors"] = hexes["province_id"].map(sea_neighbors)
+    hexes["terrain"] = hexes["province_id"].map(terrain)
     hexes["centroid_lon"] = centroids["lon"].values
     hexes["centroid_lat"] = centroids["lat"].values
     hexes["land_frac"] = hexes["land_frac"].round(4)
 
     columns = [
-        "province_id", "name", "country", "neighbors",
+        "province_id", "name", "country", "neighbors", "sea_neighbors", "terrain",
         "centroid_lon", "centroid_lat", "land_frac", "geometry",
     ]
     hexes = hexes[columns]

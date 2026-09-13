@@ -682,6 +682,110 @@ came up.
         The Anthropic $0-credit issue is a known limitation, not something
         code can fix — needs billing credit added to that account.
 
+## Gameplay depth rollout (Phase 7+)
+
+After Phase 6, the user asked for a large set of gameplay-depth features
+(naval movement, terrain, unit composition, sieges, supply lines, rebellion,
+province development, trade, tribute, coalition wars, narrative event
+tagging) built **in a dependency order that avoids rewriting earlier work**.
+The order, and why:
+
+1. **Map depth: terrain + naval lanes** (below) — done first since it
+   regenerates the committed `provinces.geojson`; every later stage that
+   references terrain or cross-water movement needs this data to exist
+   already.
+2. Multi-resource economy (grain/iron/gold tied to terrain) — no schema
+   migration needed, since `FactionState.resources`/`.units` are already
+   untyped `dict[str, int]` at every layer (agent state, `ScenarioFaction`
+   JSONB, `FactionStateSnapshot` JSONB, backend Pydantic schemas).
+3. Unit composition (infantry/cavalry/siege, rock-paper-scissors) — same
+   reason, `units` is already the right shape.
+4. Sieges (multi-turn capture) — reuses stage 3's combat code.
+5. Supply lines/attrition — reuses stage 1's adjacency/terrain distance calc
+   and stage 4's siege target as a "front line" proxy (the project
+   deliberately has no per-province garrisons — one pooled army per
+   faction — so this is a lightweight distance proxy, not a garrison
+   rewrite).
+6. Rebellion/unrest — reuses stage 5's distance-from-capital helper; the
+   project's first RNG-based mechanic (seeded per game, for testability).
+7. Province development — placed after sieges/rebellion so it has real
+   defensive mechanics to plug into.
+8. Trade agreements — reuses the existing reciprocal `pending_proposals`
+   handshake from `negotiate` almost as-is.
+9. Tribute/vassalage — same reused mechanism as trade.
+10. Coalition wars (joint offensives among allies) — prompt-context +
+    a rule-triggered event, no combat rewrite.
+11. Narrative event tagging — last, so there's a rich set of event types
+    (siege, rebellion, tribute, trade, coalition) to narrate.
+
+### Stage 1 — terrain + naval movement (done)
+
+- **Terrain** (`map_data/generate_map.py`'s `_classify_terrain`): a
+  gameplay-flavor proxy derived only from data the pipeline already
+  computes — no new Natural Earth layers (elevation/bathymetry) downloaded.
+  `is_coastal` is true if a province borders a *real* water gap (an H3
+  neighbor that was tiled and dropped for insufficient land — distinguished
+  from a neighbor missing only because it falls outside the generation
+  bbox, a clipping artifact that would otherwise misclassify ~44 provinces
+  near the bbox's northern edge) OR the province is mostly water itself
+  despite being topologically land-ringed at this hex resolution
+  (`land_frac < 0.5` — several small Greek island/gulf hexes have
+  `land_frac` as low as 0.02–0.15 despite all 6 neighbors being kept).
+  Remaining provinces are `plains` (`land_frac >= 0.9`) or `hills` (the
+  partial-water minority in between — non-coastal hexes on this map cluster
+  overwhelmingly at exactly `land_frac == 1.0`, so 0.9 cleanly separates the
+  genuine minority). Current map: 169 coastal / 178 plains / 25 hills (of
+  372).
+- **Naval lanes** (`_compute_sea_neighbors`): short cross-water `move_army`
+  lanes between coastal provinces that aren't already land-adjacent (H3
+  res-3 hexes already bridge some narrow straits — e.g. Gibraltar — as
+  land adjacency, confirmed empirically, so no lane needed there). Pairs
+  are filtered by centroid distance (LAEA CRS, cap 400km — calibrated so
+  the Sicily/Tunisia crossing, the motivating case, is included) and by a
+  trimmed-line-vs-land check: both centroids sit inside land by
+  construction, so testing the raw centroid-to-centroid line against the
+  real land polygon rejects real open-water crossings too (confirmed
+  against real Adriatic/Ionian pairs) — trimming `min(30km, 30% of length)`
+  off each end before testing the remaining "core" segment fixes this.
+  Each province keeps its nearest 3 candidates, symmetrized by union (a
+  few real chokepoints end up with more than 3 lanes — expected, not a
+  bug). A fallback guarantees every coastal province at least one lane
+  (its single nearest coastal province, land-adjacency excluded) even
+  beyond the 400km cap — verified live: all 169 coastal provinces ended up
+  with ≥1 sea lane. **Bug caught by the new symmetry tests, not by
+  inspection**: the first version of that fallback didn't exclude
+  provinces already reachable by land, so it could add a redundant sea
+  lane duplicating an existing land border — fixed by excluding
+  `neighbors.get(h3_id, ())` from the fallback's candidate set.
+- `map_data/loader.py`: `Province` gained `terrain`, `sea_neighbors`, and
+  `land_frac` (the last was silently dropped by the loader before this,
+  despite being in the file and already required by
+  `tests/test_map_data.py`'s `REQUIRED_PROPERTIES` — a pre-existing latent
+  gap, fixed as part of this touch). New `sea_neighbors_of()` accessor
+  mirrors `neighbors_of`.
+- `agents/graph.py`'s `_legal_move_targets` now also includes
+  `sea_neighbors_of(province_id)` for owned provinces — the only
+  gameplay-facing change this stage. No change to `agents/actions.py`,
+  `_sanitize_action`, or `game/rules.py`'s `move_army` resolution — a
+  sea-lane target is just another string in the existing legal-target set,
+  by design (no naval unit type or ship-building mechanic yet; that's
+  deferred, not an oversight).
+- `tests/test_map_data.py`: added terrain-value, sea-neighbor-symmetry,
+  sea-neighbors-only-connect-coastal, no-redundant-land+sea-edge, and a
+  direct "Tunisia can reach Italy by sea" regression test for the
+  motivating case. 12/12 pass; full suite 98/98.
+- Verified live: regenerated `provinces.geojson` (still exactly 372
+  provinces — the algorithm changes properties, not which hexes are kept),
+  confirmed via the loader that multiple Tunisia provinces now list
+  Sicily/Italy provinces as `sea_neighbors`. No live LLM calls needed for
+  this stage (mocked graph/rules tests already cover `_legal_move_targets`'
+  consumers).
+
+Stages 2–11 will each get their own short validation pass against the real
+code before implementation (the same way stage 1's terrain thresholds and
+naval distance cutoff needed real data to calibrate correctly, not just
+up-front assumptions), landing as their own commits in this same order.
+
 ## Non-goals
 
 - No live Google Maps API calls in the core game loop (cost/quota, and historical

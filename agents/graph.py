@@ -22,7 +22,7 @@ from agents.llm import build_llm
 from agents.roles import describe
 from agents.state import FactionState, GameState
 from game.rules import diplomatic_status_between, resolve_action, territory_of
-from map_data.loader import name_of, neighbors_of
+from map_data.loader import name_of, neighbors_of, sea_neighbors_of
 
 INTENT_REFRESH_INTERVAL = 3
 
@@ -32,11 +32,16 @@ def _other_faction_ids(state: GameState, faction_id: str) -> list[str]:
 
 
 def _legal_move_targets(state: GameState, faction_id: str) -> list[str]:
-    """Own territory (reinforce) plus every province adjacent to it."""
+    """Own territory (reinforce), every province adjacent to it, and any
+    short cross-water lane out of an owned coastal province (see
+    `map_data.loader.sea_neighbors_of`) — treated identically to land
+    adjacency for now (a sea-lane target still just resolves through the
+    same `move_army` action)."""
     owned = territory_of(state, faction_id)
     targets = set(owned)
     for province_id in owned:
         targets.update(neighbors_of(province_id))
+        targets.update(sea_neighbors_of(province_id))
     return sorted(targets)
 
 

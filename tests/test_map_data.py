@@ -11,9 +11,11 @@ import pytest
 PROVINCES_PATH = Path(__file__).parent.parent / "map_data" / "provinces.geojson"
 
 REQUIRED_PROPERTIES = {
-    "province_id", "name", "country", "neighbors",
+    "province_id", "name", "country", "neighbors", "sea_neighbors", "terrain",
     "centroid_lon", "centroid_lat", "land_frac",
 }
+
+VALID_TERRAINS = {"coastal", "hills", "plains"}
 
 
 @pytest.fixture(scope="module")
@@ -53,13 +55,58 @@ def test_adjacency_is_symmetric(provinces):
 
 def test_no_orphans_or_self_loops(provinces):
     for province_id, props in provinces.items():
-        assert props["neighbors"], f"{province_id} has no neighbors"
+        assert props["neighbors"] or props["sea_neighbors"], (
+            f"{province_id} has no land or sea neighbors"
+        )
         assert province_id not in props["neighbors"], f"{province_id} neighbors itself"
+        assert province_id not in props["sea_neighbors"], f"{province_id} sea_neighbors itself"
 
 
 def test_land_frac_within_bounds(provinces):
     for props in provinces.values():
         assert 0.0 < props["land_frac"] <= 1.0
+
+
+def test_terrain_is_a_known_value(provinces):
+    for props in provinces.values():
+        assert props["terrain"] in VALID_TERRAINS
+
+
+def test_sea_neighbors_is_symmetric(provinces):
+    for province_id, props in provinces.items():
+        for other_id in props["sea_neighbors"]:
+            assert province_id in provinces[other_id]["sea_neighbors"], (
+                f"{province_id} lists {other_id} as a sea_neighbor, but not vice versa"
+            )
+
+
+def test_sea_neighbors_only_connect_coastal_provinces(provinces):
+    for province_id, props in provinces.items():
+        if props["sea_neighbors"]:
+            assert props["terrain"] == "coastal", (
+                f"{province_id} has sea_neighbors but isn't coastal"
+            )
+        for other_id in props["sea_neighbors"]:
+            assert provinces[other_id]["terrain"] == "coastal"
+
+
+def test_sea_neighbors_are_not_already_land_neighbors(provinces):
+    for province_id, props in provinces.items():
+        overlap = set(props["neighbors"]) & set(props["sea_neighbors"])
+        assert not overlap, f"{province_id} has redundant land+sea neighbors: {overlap}"
+
+
+def test_carthage_can_reach_sicily_or_italy_by_sea(provinces):
+    """The original motivating case for naval lanes: Tunisia and Italy don't
+    share a land border on this map, so a Carthage/Rome naval war needs at
+    least one Tunisia<->Italy sea_neighbor pair to be possible at all.
+    """
+    tunisia_ids = {pid for pid, p in provinces.items() if p["country"] == "Tunisia"}
+    italy_ids = {pid for pid, p in provinces.items() if p["country"] == "Italy"}
+    reachable = any(
+        set(provinces[pid]["sea_neighbors"]) & italy_ids for pid in tunisia_ids
+    )
+    assert reachable, "no Tunisia province has a sea lane into Italy"
 
 
 def test_demo_faction_homelands_present(provinces):
