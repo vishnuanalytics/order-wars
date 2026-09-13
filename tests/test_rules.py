@@ -2,8 +2,18 @@
 mocking — real province ids from the committed map, real adjacency.
 """
 
+from typing import get_args
+
+from agents.actions import UnitType
 from agents.state import FactionState, GameState
-from game.rules import diplomatic_status_between, pair_key, resolve_action, territory_of
+from game.rules import (
+    COUNTERS,
+    UNIT_COSTS,
+    diplomatic_status_between,
+    pair_key,
+    resolve_action,
+    territory_of,
+)
 
 HOME = "831e80fffffffff"  # Italy 20, terrain=plains -> income yields grain
 NEIGHBOR = "831e81fffffffff"  # Italy 19, adjacent to HOME
@@ -11,7 +21,13 @@ FAR_AWAY = "83386efffffffff"  # Tunisia 2, not adjacent to HOME
 
 
 def _faction(
-    faction_id: str, name: str, gold: int = 20, iron: int = 20, legions: int = 2
+    faction_id: str,
+    name: str,
+    gold: int = 20,
+    iron: int = 20,
+    grain: int = 0,
+    legions: int = 2,
+    units: dict[str, int] | None = None,
 ) -> FactionState:
     return {
         "faction_id": faction_id,
@@ -19,8 +35,8 @@ def _faction(
         "role_preset": "custom",
         "intent": None,
         "last_action": None,
-        "resources": {"gold": gold, "iron": iron},
-        "units": {"legion": legions},
+        "resources": {"gold": gold, "iron": iron, "grain": grain},
+        "units": units if units is not None else {"legion": legions},
     }
 
 
@@ -118,6 +134,77 @@ def test_move_army_into_enemy_territory_at_war_weaker_attacker_loses():
     assert result["factions"]["rome"]["units"]["legion"] == 0  # loser attrition
 
 
+def test_unit_type_literal_matches_unit_costs_and_counters():
+    """agents.actions.UnitType is a closed Pydantic Literal -- an LLM can
+    never actually produce a unit_type outside it (Pydantic rejects that at
+    parse time, unlike the free-text target_province/target_faction fields
+    _sanitize_action has to repair). The real risk is these three staying
+    in sync by hand as unit types get added; this guards that, since a
+    silent drift wouldn't be caught by Pydantic at all.
+    """
+    unit_types = set(get_args(UnitType))
+    assert unit_types == set(UNIT_COSTS.keys())
+    assert unit_types == set(COUNTERS.keys())
+
+
+def test_cavalry_beats_a_larger_legion_force_via_counter_bonus():
+    """4 cavalry (attacker) vs 5 legion (defender): fewer raw units, but
+    cavalry counters legion for a +50% effective-strength bonus (4 * 1.5 =
+    6.0 > 5.0) -- the whole point of unit composition mattering, not just
+    headcount."""
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        factions={
+            "rome": _faction("rome", "Rome", units={"cavalry": 4}),
+            "carthage": _faction("carthage", "Carthage", units={"legion": 5}),
+        },
+    )
+    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    assert result["province_owner"][NEIGHBOR] == "rome"
+
+
+def test_siege_engine_beats_a_larger_cavalry_force_via_counter_bonus():
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        factions={
+            "rome": _faction("rome", "Rome", units={"siege_engine": 4}),
+            "carthage": _faction("carthage", "Carthage", units={"cavalry": 5}),
+        },
+    )
+    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    assert result["province_owner"][NEIGHBOR] == "rome"
+
+
+def test_legion_beats_a_larger_siege_engine_force_via_counter_bonus():
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        factions={
+            "rome": _faction("rome", "Rome", units={"legion": 4}),
+            "carthage": _faction("carthage", "Carthage", units={"siege_engine": 5}),
+        },
+    )
+    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    assert result["province_owner"][NEIGHBOR] == "rome"
+
+
+def test_same_unit_type_combat_is_unaffected_by_counter_bonus():
+    """No counter relationship applies when both sides field the same type
+    -- combat degenerates to the pre-Stage-3 raw headcount comparison."""
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        factions={
+            "rome": _faction("rome", "Rome", units={"cavalry": 4}),
+            "carthage": _faction("carthage", "Carthage", units={"cavalry": 5}),
+        },
+    )
+    result = resolve_action(state, "rome", _action("move_army", target_province=NEIGHBOR))
+    assert result["province_owner"][NEIGHBOR] == "carthage"  # attacker still weaker, no bonus to save it
+
+
 def test_build_unit_spends_gold_and_adds_unit():
     state = _state()
     result = resolve_action(state, "rome", _action("build_unit"))
@@ -126,6 +213,27 @@ def test_build_unit_spends_gold_and_adds_unit():
     assert result["factions"]["rome"]["resources"]["gold"] == 10  # 20 - 10
     assert result["factions"]["rome"]["resources"]["iron"] == 15  # 20 - 5
     assert result["factions"]["rome"]["units"]["legion"] == 3
+
+
+def test_build_unit_defaults_to_legion_when_unit_type_unset():
+    state = _state()
+    result = resolve_action(state, "rome", _action("build_unit"))
+    assert set(result["factions"]["rome"]["units"].keys()) == {"legion"}
+
+
+def test_build_unit_can_choose_a_different_unit_type():
+    state = _state(
+        factions={
+            "rome": _faction("rome", "Rome", gold=20, iron=0, grain=10),
+            "carthage": _faction("carthage", "Carthage"),
+        }
+    )
+    result = resolve_action(state, "rome", _action("build_unit", unit_type="cavalry"))
+    # Cavalry costs 15 gold + 10 grain, not gold+iron -- succeeds despite 0 iron.
+    resources = result["factions"]["rome"]["resources"]
+    assert resources["gold"] == 5  # 20 - 15
+    assert resources["grain"] == 1  # 10 starting + 1 income (plains) - 10 cost
+    assert result["factions"]["rome"]["units"]["cavalry"] == 1
 
 
 def test_build_unit_is_a_no_op_when_short_on_a_required_resource():

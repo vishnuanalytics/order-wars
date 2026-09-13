@@ -21,7 +21,7 @@ from agents.actions import FactionAction
 from agents.llm import build_llm
 from agents.roles import describe
 from agents.state import FactionState, GameState
-from game.rules import diplomatic_status_between, resolve_action, territory_of
+from game.rules import COUNTERS, UNIT_COSTS, diplomatic_status_between, resolve_action, territory_of
 from map_data.loader import get_province, name_of, neighbors_of, sea_neighbors_of
 
 INTENT_REFRESH_INTERVAL = 3
@@ -43,6 +43,18 @@ def _legal_move_targets(state: GameState, faction_id: str) -> list[str]:
         targets.update(neighbors_of(province_id))
         targets.update(sea_neighbors_of(province_id))
     return sorted(targets)
+
+
+def _unit_options_summary() -> str:
+    """Derived from game.rules.UNIT_COSTS/COUNTERS rather than hardcoded, so
+    this stays correct if either changes — same convention as move_options
+    being derived from real map/state data rather than a fixed string."""
+    parts = []
+    for unit_type, cost in UNIT_COSTS.items():
+        cost_str = ", ".join(f"{amount} {res}" for res, amount in cost.items())
+        beats = COUNTERS.get(unit_type)
+        parts.append(f"{unit_type} ({cost_str}{f' — beats {beats}' if beats else ''})")
+    return "; ".join(parts)
 
 
 def _diplomacy_summary(state: GameState, faction_id: str) -> str:
@@ -101,6 +113,8 @@ def _decide_action(
         f"Your resources: {faction['resources']}. Your units: {faction['units']}.\n"
         "Each province you hold yields a resource every turn based on its "
         "terrain: coastal -> gold, plains -> grain, hills -> iron.\n"
+        f"To build_unit, choose unit_type: {_unit_options_summary()}. "
+        "Defaults to legion if unset.\n"
         f"Provinces you may move_army into this turn (own or adjacent, with "
         f"terrain): {move_options}\n"
         f"Other factions and your relations with them: {_diplomacy_summary(state, faction_id)}\n"

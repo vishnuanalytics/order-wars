@@ -2,7 +2,7 @@ from langgraph.graph import END
 
 from agents import graph as graph_module
 from agents.actions import FactionAction
-from agents.graph import build_graph, faction_turn, route_after_turn
+from agents.graph import _sanitize_action, build_graph, faction_turn, route_after_turn
 from agents.state import FactionState, GameState
 
 ROME_HOME = "831e80fffffffff"  # Italy 20
@@ -107,6 +107,19 @@ def test_faction_turn_sanitizes_illegal_move_to_hold(monkeypatch):
     assert carthage["last_action"]["action_type"] == "hold"
     assert "sanitized to hold" in carthage["last_action"]["rationale"]
     assert ROME_NEIGHBOR not in update["province_owner"]  # never applied
+
+
+def test_sanitize_action_allows_a_known_unit_type():
+    state = _state(
+        {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+    )
+    action = FactionAction(action_type="build_unit", unit_type="cavalry", rationale="testing")
+
+    sanitized = _sanitize_action(state, "rome", action, move_targets=[])
+
+    assert sanitized.action_type == "build_unit"
+    assert sanitized.unit_type == "cavalry"
 
 
 def test_faction_turn_skips_intent_refresh_when_not_due(monkeypatch):

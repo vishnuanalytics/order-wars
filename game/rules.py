@@ -7,12 +7,13 @@ LLM-free, so it's fully unit-testable without mocking anything (see
 live — `agents/graph.py` calls `resolve_action` rather than mutating state
 itself.
 
-Scoped deliberately simple for Phase 4 (see CLAUDE.md "Project phases" and
-`agents/actions.py`): one pooled army per faction (no per-province
-garrisons), one-shot combat on `move_army` into enemy territory (no
-multi-turn sieges), and diplomacy as a plain reciprocal handshake (no
-power-triggered coalition mechanics). All of that is real Phase 5 territory,
-not missing polish.
+Combat weighs unit-type matchups (COUNTERS/_effective_strength) but is
+still scoped deliberately simple otherwise (see CLAUDE.md "Gameplay depth
+rollout" and `agents/actions.py`): one pooled army per faction (no
+per-province garrisons), one-shot combat on `move_army` into enemy
+territory (no multi-turn sieges), and diplomacy as a plain reciprocal
+handshake (no power-triggered coalition mechanics). Those are later
+gameplay-depth stages, not missing polish.
 """
 
 import math
@@ -34,13 +35,26 @@ TERRAIN_RESOURCE: dict[str, str] = {
 INCOME_PER_PROVINCE = 1
 
 # Per-unit-type build costs, keyed by resource. A dict-of-dicts (not a flat
-# int) on purpose: unit composition (more unit types, each with their own
-# cost) is a later stage — this shape lets that stage add entries here
-# without changing the build_unit resolution logic below.
+# int) on purpose: this shape let Stage 2 land the single "legion" entry
+# without the build_unit resolution logic below needing to change once
+# Stage 3 (here) added cavalry/siege_engine alongside it.
 UNIT_COSTS: dict[str, dict[str, int]] = {
     "legion": {"gold": 10, "iron": 5},
+    "cavalry": {"gold": 15, "grain": 10},  # horses need feeding, not mining
+    "siege_engine": {"iron": 20, "gold": 5},  # engineering-heavy, not manpower
 }
-BUILD_UNIT_TYPE = "legion"
+DEFAULT_UNIT_TYPE = "legion"  # what build_unit builds if a turn doesn't specify
+
+# Rock-paper-scissors: each key is stronger against its value.
+# cavalry (mobility) > legion (line infantry) > siege_engine (immobile,
+# vulnerable in melee) > cavalry (shredded by ranged bombardment).
+COUNTERS: dict[str, str] = {
+    "cavalry": "legion",
+    "legion": "siege_engine",
+    "siege_engine": "cavalry",
+}
+COUNTER_BONUS = 0.5  # +50% effective strength vs. the type this counters
+
 COMBAT_LOSER_ATTRITION = 0.5  # fraction of units the loser sheds
 COMBAT_WINNER_ATTRITION = 0.1  # fraction of units the winner still sheds
 
@@ -58,8 +72,25 @@ def diplomatic_status_between(state: GameState, faction_a: str, faction_b: str) 
     return state["diplomatic_status"].get(pair_key(faction_a, faction_b), "neutral")
 
 
-def _total_units(units: dict[str, int]) -> int:
-    return sum(units.values())
+def _effective_strength(units: dict[str, int], enemy_units: dict[str, int]) -> float:
+    """Combat strength of `units` against a specific `enemy_units`
+    composition — a plain unit-count sum (like before unit composition
+    existed) scaled up by COUNTER_BONUS in proportion to how much of the
+    enemy's force this side's unit types counter (see COUNTERS).
+
+    Scaling by the *fraction* of the enemy composition countered (not a
+    flat bonus whenever any countered unit is present at all) means a
+    handful of cavalry can't claim a full bonus against an army that's
+    mostly siege engines — only the legion slice of that army is actually
+    a favorable matchup.
+    """
+    enemy_total = sum(enemy_units.values()) or 1
+    strength = 0.0
+    for unit_type, count in units.items():
+        countered_type = COUNTERS.get(unit_type)
+        countered_fraction = (enemy_units.get(countered_type, 0) / enemy_total) if countered_type else 0.0
+        strength += count * (1 + COUNTER_BONUS * countered_fraction)
+    return strength
 
 
 def _apply_income(faction: FactionState, owned: list[str]) -> None:
@@ -115,16 +146,17 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         resolution = "held position"
 
     elif action.action_type == "build_unit":
-        cost = UNIT_COSTS[BUILD_UNIT_TYPE]
+        unit_type = action.unit_type or DEFAULT_UNIT_TYPE
+        cost = UNIT_COSTS[unit_type]
         resources = faction["resources"]
         if all(resources.get(res, 0) >= amount for res, amount in cost.items()):
             for res, amount in cost.items():
                 resources[res] -= amount
-            faction["units"][BUILD_UNIT_TYPE] = faction["units"].get(BUILD_UNIT_TYPE, 0) + 1
-            resolution = f"built 1 {BUILD_UNIT_TYPE}"
+            faction["units"][unit_type] = faction["units"].get(unit_type, 0) + 1
+            resolution = f"built 1 {unit_type}"
         else:
             cost_str = " and ".join(f"{amount} {res}" for res, amount in cost.items())
-            resolution = f"tried to build a {BUILD_UNIT_TYPE} but lacked {cost_str}"
+            resolution = f"tried to build a {unit_type} but lacked {cost_str}"
 
     elif action.action_type == "declare_war":
         target = action.target_faction
@@ -157,8 +189,8 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         else:
             defender = dict(factions[owner])
             defender["units"] = dict(defender["units"])
-            attacker_strength = _total_units(faction["units"])
-            defender_strength = _total_units(defender["units"])
+            attacker_strength = _effective_strength(faction["units"], defender["units"])
+            defender_strength = _effective_strength(defender["units"], faction["units"])
             if attacker_strength > defender_strength:
                 province_owner[target_province] = faction_id
                 faction["units"] = _attrit(faction["units"], COMBAT_WINNER_ATTRITION)

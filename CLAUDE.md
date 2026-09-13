@@ -834,10 +834,63 @@ predicted.
   gold, 15 iron, 5 grain — 3 units" correctly, then cleaned up the test
   row from Neon. 99/99 tests pass.
 
-Stages 3–11 will each get their own short validation pass against the real
-code before implementation (the same way stages 1 and 2 needed real data/
-code to calibrate correctly, not just up-front assumptions), landing as
-their own commits in this same order.
+### Stage 3 — unit composition, rock-paper-scissors combat (done)
+
+- `agents/actions.py`: `FactionAction` gained `unit_type: UnitType | None`
+  (`Literal["legion", "cavalry", "siege_engine"]`, defaults to legion if
+  unset) — additive, no existing field changed.
+- `game/rules.py`: `UNIT_COSTS` extended with `cavalry` (15 gold, 10 grain
+  — horses need feeding, not mining) and `siege_engine` (20 iron, 5 gold —
+  engineering-heavy, not manpower) alongside the existing `legion` entry;
+  `build_unit`'s resolution logic needed zero changes to support them,
+  exactly as Stage 2's dict-of-dicts shape was designed to allow.
+  `BUILD_UNIT_TYPE` renamed `DEFAULT_UNIT_TYPE` (now genuinely a fallback,
+  not the only option).
+- New `COUNTERS` triangle (`cavalry > legion > siege_engine > cavalry`)
+  and `_effective_strength()`, replacing the flat `_total_units()` sum
+  (deleted — dead code once combat stopped calling it) in the `move_army`
+  combat branch. Effective strength scales a side's raw count up by
+  `COUNTER_BONUS` (0.5) in proportion to *how much of the enemy's specific
+  composition* it counters (not a flat bonus for merely holding any
+  countering unit) — a few cavalry can't claim a full bonus against an
+  army that's mostly siege engines. Same-type-vs-same-type combat is
+  mathematically unaffected (no countered type present → 0 bonus),
+  preserving every Phase-4 combat test's original raw-headcount behavior.
+- `agents/graph.py`'s executor prompt gained `_unit_options_summary()` —
+  each unit type's cost and counter relationship, derived from
+  `game.rules.UNIT_COSTS`/`COUNTERS` rather than hardcoded text, so it
+  can't drift out of sync with the actual rules.
+- Considered and rejected a runtime sanitization check for an invalid
+  `unit_type`: unlike `target_province`/`target_faction` (plain strings an
+  LLM can genuinely hallucinate past the prompt's listed options),
+  `unit_type` is a closed Pydantic `Literal` — invalid values are already
+  rejected at structured-output parse time, before `_sanitize_action` ever
+  runs, making a runtime check dead code. Guarded the real risk instead
+  (`UnitType`, `UNIT_COSTS`, and `COUNTERS` silently drifting out of sync
+  by hand) with a direct consistency test.
+- `tests/test_rules.py`: one test per side of the RPS triangle (each
+  demonstrates a *numerically smaller* force winning via the counter
+  bonus — 4 cavalry beats 5 legion, etc. — not just "wins," to prove the
+  bonus is actually doing the work), a same-type-no-bonus regression test,
+  new build-cost tests (default unit type, explicit `unit_type` choice),
+  and the `UnitType`/`UNIT_COSTS`/`COUNTERS` consistency test. 107/107
+  tests pass.
+- No live LLM calls needed to build/verify this stage (pure rules-engine
+  logic, fully covered by mocked/direct tests) — the executor prompt's
+  token-budget headroom (`max_tokens=900`, tuned with real margin when
+  bumped from 600 for a 4-field schema) hasn't been re-verified live
+  against the now-5-field schema; flagged for whenever LLM quota is next
+  confirmed available, not assumed safe.
+- No frontend change this stage: the UI still shows an aggregate unit
+  count (`FactionStateSnapshot.unit_count`, a plain int, unaffected by
+  richer composition since it's still `sum(units.values())`) rather than
+  a type breakdown — showing composition would need a new DB column/
+  migration, which nothing in this stage's scope actually requires yet.
+
+Stages 4–11 will each get their own short validation pass against the real
+code before implementation (the same way stages 1-3 needed real data/code
+to calibrate correctly, not just up-front assumptions), landing as their
+own commits in this same order.
 
 ## Non-goals
 

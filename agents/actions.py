@@ -8,10 +8,11 @@ LLM call must produce.
 
 Scoped deliberately: no per-province garrisons or siege mechanics (a
 faction's units are one pooled army, and a `move_army` into enemy territory
-is one-shot combat, not a multi-turn siege) — that nuance is Phase 5, per
-CLAUDE.md's directory structure. Diplomacy is a simple reciprocal handshake
-(a matching `negotiate` from both sides resolves it) rather than the fuller
-power-triggered coalition mechanics also documented as Phase 5 territory.
+is one-shot combat, not a multi-turn siege) — that nuance is a later
+gameplay-depth stage (see CLAUDE.md's "Gameplay depth rollout"). Diplomacy
+is a simple reciprocal handshake (a matching `negotiate` from both sides
+resolves it) rather than the fuller power-triggered coalition mechanics
+also documented as later-stage territory.
 """
 
 from typing import Literal
@@ -20,6 +21,9 @@ from pydantic import BaseModel, Field
 
 ActionType = Literal["move_army", "build_unit", "negotiate", "declare_war", "hold"]
 ProposalType = Literal["truce", "alliance"]
+# Rock-paper-scissors unit composition (see game/rules.py's COUNTERS):
+# cavalry > legion > siege_engine > cavalry.
+UnitType = Literal["legion", "cavalry", "siege_engine"]
 
 
 class FactionAction(BaseModel):
@@ -31,7 +35,8 @@ class FactionAction(BaseModel):
             "of your current territory or adjacent to it. Unclaimed or "
             "your-own territory is captured/reinforced peacefully; enemy "
             "territory triggers combat and only succeeds if you're at war "
-            "with its owner. build_unit: spend resources to add a unit. "
+            "with its owner. build_unit: spend resources to add a unit of "
+            "unit_type (defaults to legion if unset). "
             "negotiate: propose (or, if target_faction already proposed the "
             "same thing to you, accept) a truce or alliance with "
             "target_faction. declare_war: unilaterally go to war with "
@@ -46,5 +51,13 @@ class FactionAction(BaseModel):
     )
     proposal: ProposalType | None = Field(
         default=None, description="Required for negotiate: 'truce' or 'alliance'."
+    )
+    unit_type: UnitType | None = Field(
+        default=None,
+        description=(
+            "Optional for build_unit: which unit type to build — "
+            "'legion', 'cavalry', or 'siege_engine'. Defaults to 'legion' "
+            "if unset."
+        ),
     )
     rationale: str = Field(description="One short sentence explaining the choice.")
