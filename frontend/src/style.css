@@ -469,6 +469,25 @@ form input[type="number"] {
 .action-field-rationale {
   flex-basis: 100% !important;
 }
+.target-province-row {
+  display: flex;
+  gap: 0.3rem;
+}
+.target-province-row input {
+  flex: 1;
+  min-width: 0;
+}
+.pick-target-province-button {
+  flex-shrink: 0;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--accent);
+  background: #fff;
+  color: var(--accent);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
 .action-form button[type="submit"] {
   flex-basis: 100%;
   padding: 0.3rem;

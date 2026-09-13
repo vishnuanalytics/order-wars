@@ -50,6 +50,13 @@ export class GameView {
     // refreshGameDetail's repeated calls while showing a finished game
     // don't refetch every time.
     this.highlightsByGameId = new Map();
+    // "Pick a province on the map" state for an action form's
+    // target_province field — see _armProvincePicker. Which faction's form
+    // (by id) is currently picking, and the onProvinceClick handler to
+    // restore once picking ends (cancelled, completed, or the game
+    // switches). null/null means nobody is picking right now.
+    this.pickingProvinceForFaction = null;
+    this.pickingRestoreHandler = null;
     // DB faction ids (uuids) currently human-controlled, from the
     // control_state snapshot a fresh connection gets and control_changed
     // broadcasts thereafter — see watchGame. No-auth, like everything else
@@ -82,7 +89,8 @@ export class GameView {
     this.eventLogEl.innerHTML = "";
     this.tickerEl.hidden = true;
     this.controlledFactions = new Set();
-    this.prediction = null;
+    this.prediction = this._loadPrediction(gameId);
+    if (this.pickingProvinceForFaction) this._stopProvincePicking();
     this._stopReplay();
     this.replayControlsEl.hidden = true;
     this._closeSocket();
@@ -133,6 +141,13 @@ export class GameView {
     this.eventLogEl.innerHTML = "";
     this.tickerEl.hidden = true;
     this.controlledFactions = new Set();
+    // Not just resetting to null: a replay can be revisiting a game the
+    // viewer watched live and predicted on earlier — load whatever's
+    // stored so the reveal is still correct now, rather than either
+    // leaking a stale prediction from whatever game was watched most
+    // recently (the actual bug this replaced) or always showing nothing.
+    this.prediction = this._loadPrediction(gameId);
+    if (this.pickingProvinceForFaction) this._stopProvincePicking();
     await this.refreshGameDetail(); // populates factionNameById before the log needs it
 
     const [events, snapshots] = await Promise.all([getGameEvents(gameId), getGameSnapshots(gameId)]);
@@ -496,6 +511,7 @@ export class GameView {
     this.gameDetailEl.querySelectorAll(".prediction-button").forEach((button) => {
       button.addEventListener("click", async () => {
         this.prediction = button.dataset.factionId;
+        this._savePrediction(this.currentGameId, this.prediction);
         await this.refreshGameDetail();
       });
     });
@@ -532,7 +548,10 @@ export class GameView {
         </label>
         <label class="action-field field-target_province" hidden>
           Target province id
-          <input type="text" name="target_province" placeholder="e.g. 831e80fffffffff" />
+          <div class="target-province-row">
+            <input type="text" name="target_province" placeholder="e.g. 831e80fffffffff" />
+            <button type="button" class="pick-target-province-button">📍 Pick on map</button>
+          </div>
         </label>
         <label class="action-field field-unit_type" hidden>
           Unit type
@@ -603,6 +622,39 @@ export class GameView {
     form.addEventListener("action-type-restored", updateVisibleFields);
     updateVisibleFields();
 
+    // "Pick on map" — target_province is a real province id
+    // (e.g. "831e80fffffffff"), not discoverable by typing; this borrows
+    // MapView's single onProvinceClick slot (otherwise owned by
+    // ScenarioEditor, which safely no-ops unless it's actively picking a
+    // scenario's home province — see its _handleMapClick) for exactly one
+    // click, then hands it back.
+    //
+    // Picking state lives on `this` (the GameView instance), not a
+    // per-form closure: refreshGameDetail rebuilds every .action-form's
+    // DOM on every live event (any faction's turn, not just this one), so
+    // a closure captured by the form that existed *before* that rebuild
+    // would end up pointing MapView's click handler at a now-detached,
+    // never-rendered-again form — clicking a province would silently do
+    // nothing visible. _armProvincePicker below re-establishes picking
+    // against whatever the *current* form element is, every time this
+    // faction's form gets rewired, for as long as picking stays armed.
+    const pickButton = form.querySelector(".pick-target-province-button");
+    if (pickButton) {
+      pickButton.addEventListener("click", () => {
+        if (this.pickingProvinceForFaction === form.dataset.factionId) {
+          this._stopProvincePicking();
+          pickButton.textContent = "📍 Pick on map";
+        } else {
+          this.pickingProvinceForFaction = form.dataset.factionId;
+          this.pickingRestoreHandler = this.mapView.onProvinceClick;
+          this._armProvincePicker(form, pickButton);
+        }
+      });
+      if (this.pickingProvinceForFaction === form.dataset.factionId) {
+        this._armProvincePicker(form, pickButton); // resume across a rebuild mid-pick
+      }
+    }
+
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const data = new FormData(form);
@@ -623,6 +675,44 @@ export class GameView {
         if (button) button.textContent = "Submit for your next turn";
       }, 1500);
     });
+  }
+
+  _armProvincePicker(form, button) {
+    button.textContent = "Click a province… (cancel)";
+    this.mapView.onProvinceClick = (provinceId) => {
+      const input = form.querySelector("input[name=target_province]");
+      if (input) input.value = provinceId;
+      this._stopProvincePicking();
+      button.textContent = "📍 Pick on map";
+    };
+  }
+
+  _stopProvincePicking() {
+    this.mapView.onProvinceClick = this.pickingRestoreHandler;
+    this.pickingProvinceForFaction = null;
+    this.pickingRestoreHandler = null;
+  }
+
+  /** sessionStorage, not a bare instance field: reloading the page mid-game
+   * used to silently lose a locked-in prediction, discovered while
+   * verifying the feature live. Per-tab (sessionStorage, not
+   * localStorage) since a prediction is about watching *this* game right
+   * now, not a standing preference worth carrying to a new tab/session.
+   */
+  _savePrediction(gameId, factionId) {
+    try {
+      sessionStorage.setItem(`orderWarsPrediction:${gameId}`, factionId);
+    } catch {
+      // best-effort — the reveal just won't survive a reload if this fails
+    }
+  }
+
+  _loadPrediction(gameId) {
+    try {
+      return sessionStorage.getItem(`orderWarsPrediction:${gameId}`);
+    } catch {
+      return null;
+    }
   }
 
   setStatus(text, statusClass) {

@@ -273,7 +273,11 @@ export class ReviewView {
     };
     const rows = filtered.map((event) => {
       const scoreByMetric = Object.fromEntries(event.eval_scores.map((s) => [s.metric_name, s]));
-      const annotation = event.annotations[0];
+      // An event can carry more than one annotation (multiple reviewers, or
+      // one reviewer adding a second note) — join rather than silently
+      // keeping only the first.
+      const ratings = event.annotations.map((a) => a.rating).filter((r) => r != null);
+      const notes = event.annotations.map((a) => a.note).filter((n) => n);
       return [
         event.turn,
         this.factionNameById[event.faction_id] || event.faction_id || "",
@@ -281,8 +285,8 @@ export class ReviewView {
         event.payload?.resolution || "",
         event.payload?.rationale || "",
         ...metricNames.flatMap((m) => [scoreByMetric[m]?.score ?? "", scoreByMetric[m]?.success ?? ""]),
-        annotation?.rating ?? "",
-        annotation?.note || "",
+        ratings.join("; "),
+        notes.join(" | "),
       ]
         .map(csvField)
         .join(",");
