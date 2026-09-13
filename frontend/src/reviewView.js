@@ -78,9 +78,10 @@ export class ReviewView {
       .join("");
 
     return `
-      <div class="review-event">
+      <div class="review-event${event.notable ? " notable-event" : ""}">
         <div class="review-event-header">
           <strong>Turn ${event.turn}</strong> — ${escapeHtml(factionName)}: ${escapeHtml(event.event_type)}
+          ${event.notable && event.headline ? `<span class="notable-badge">★ ${escapeHtml(event.headline)}</span>` : ""}
         </div>
         <div class="review-event-rationale">${escapeHtml(event.payload?.rationale || "")}</div>
         <div class="review-scores">${scoresHtml || "<em>Not evaluated yet.</em>"}</div>

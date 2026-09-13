@@ -1,5 +1,5 @@
 import { startGame, getGame, getGameEvents, listGames, gameLiveSocketUrl } from "./api.js";
-import { escapeHtml } from "./utils.js";
+import { classifyEvent, escapeHtml } from "./utils.js";
 
 export class GameView {
   constructor({ mapView }) {
@@ -71,6 +71,8 @@ export class GameView {
         target_province: event.payload?.target_province,
         target_faction: event.payload?.target_faction,
         specialist: event.payload?.specialist,
+        notable: event.notable,
+        headline: event.headline,
       });
     }
   }
@@ -87,12 +89,21 @@ export class GameView {
     const li = document.createElement("li");
     const actor = this.factionNameById[event.faction_id] || event.faction_id;
     const target = event.target_province || event.target_faction || "";
+    // REST-fetched events (replay) already carry backend-computed
+    // notable/headline; live WebSocket events don't (see
+    // game/narrative.py's docstring), so compute them client-side with
+    // the same markers instead — Stage 11.
+    const tag = event.notable !== undefined
+      ? { notable: event.notable, headline: event.headline }
+      : classifyEvent(event.action_type, event.resolution);
+    if (tag.notable) li.classList.add("notable-event");
     li.textContent =
       `Turn ${event.turn} — ${actor}` +
       (event.specialist ? ` [${event.specialist}]` : "") +
       `: ${event.action_type}` +
       (target ? ` -> ${target}` : "") +
-      (event.resolution ? ` (${event.resolution})` : "");
+      (event.resolution ? ` (${event.resolution})` : "") +
+      (tag.notable && tag.headline ? ` ★ ${tag.headline}` : "");
     this.eventLogEl.prepend(li);
   }
 

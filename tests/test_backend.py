@@ -317,6 +317,36 @@ def test_eliminated_faction_reflected_in_get_game(client, monkeypatch):
     assert factions_by_name["Carthage"]["is_alive"] is False
     assert factions_by_name["Carthage"]["eliminated_at_turn"] == 1
 
+    # game.narrative.classify_event, computed at serve time (Stage 11) --
+    # the decisive siege battle that just eliminated Carthage is notable;
+    # ordinary "hold" events (per-faction upkeep before the invasion) aren't.
+    events = client.get(f"/games/{game_id}/events").json()
+    decisive = next(e for e in events if "broke the siege" in e["payload"].get("resolution", ""))
+    assert decisive["notable"] is True
+    assert decisive["headline"] == "siege succeeds — province captured"
+
+
+def test_declare_war_event_is_flagged_notable(client, monkeypatch):
+    class _AlwaysDeclareWarLLM:
+        def __init__(self, *a, **k):
+            pass
+
+        def invoke(self, prompt):
+            return FactionAction(action_type="declare_war", target_faction="b", rationale="test")
+
+    monkeypatch.setattr(
+        graph_module, "build_llm",
+        lambda max_tokens=64, schema=None: (_AlwaysDeclareWarLLM() if schema is not None else _FakeIntentLLM()),
+    )
+
+    response = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1})
+    game_id = response.json()["game_id"]
+
+    events = client.get(f"/games/{game_id}/events").json()
+    war_events = [e for e in events if e["event_type"] == "declare_war"]
+    assert war_events
+    assert all(e["notable"] is True and e["headline"] == "war declared" for e in war_events)
+
 
 def test_failed_game_is_marked_failed_not_stuck_running(client, monkeypatch):
     """Simulates play_game raising (e.g. no LLM key configured) — the game

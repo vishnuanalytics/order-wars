@@ -1226,10 +1226,76 @@ predicted.
   for both factions and never actually exercised the outmatched-ally
   branch; fixed by passing `units={"legion": N}` directly.
 
-Stage 11 will get its own short validation pass against the real code
-before implementation (the same way stages 1-10 needed real data/code to
-calibrate correctly, not just up-front assumptions), landing as its own
-commit in this same order.
+### Stage 11 — narrative event tagging (done — closes the rollout)
+
+- New `game/narrative.py`: `classify_event(event_type, payload) ->
+  NarrativeTag(notable, headline)`. A genuinely pure presentation layer —
+  no DB migration, no `game/rules.py` changes, no new `GameState` field.
+  Computed at *read* time (`backend/main.py`'s `GET /games/{id}/events`),
+  not write time, over already-persisted `GameEvent` rows. Deliberately
+  the last stage, per the roadmap: it benefits from every event type
+  Stages 4-10 added (sieges, rebellion, tribute, trade, calls to arms) to
+  have something rich to narrate, instead of just the original five
+  action types.
+- Two classification strategies, chosen per case: `declare_war` is
+  identified directly by `event_type` (unambiguous, robust); everything
+  else (siege begins/continues/succeeds/fails, rebellion, call to arms,
+  trade/alliance/truce agreed, tribute accepted) is identified by
+  substring-matching `payload["resolution"]` text, since those can be
+  side effects appended to *any* action's resolution regardless of
+  `action_type` (a rebellion note, for instance, can ride along on a
+  plain `hold`) — `event_type` alone can't distinguish those cases.
+- This is a real, deliberate coupling to `game/rules.py`'s exact
+  resolution wording, called out explicitly in both the Python and JS
+  implementations' docstrings/comments rather than left implicit.
+  `tests/test_narrative.py` drives genuine `game.rules.resolve_action`
+  calls (reusing `tests/test_rules.py`'s fixtures, imported directly
+  rather than duplicated — `tests/__init__.py` makes that a clean import)
+  for every marker except one currently-unreachable case (a "pressed the
+  siege" turn can't happen under `SIEGE_TURNS_TO_DECIDE=2`, since a
+  second press is already the decisive battle — tested directly with a
+  constructed payload instead, with a comment explaining why). All 12
+  markers matched real generated resolution text on the very first run —
+  no drift found, but the test now guards against future drift.
+- `backend/schemas.py`'s `GameEventOut` gained `notable`/`headline` —
+  not stored columns, computed per-event in the route handler
+  (`GameEventOut.model_validate(event)` then set explicitly), documented
+  as such so nobody mistakes them for `from_attributes`-mapped ORM
+  fields.
+- Frontend: `frontend/src/utils.js` gained a small `classifyEvent()` — a
+  deliberate, explicitly-commented JS port of the same markers, used
+  *only* for live WebSocket events in `gameView.js` (which carry a raw
+  `action_type`/`resolution` from the graph, not the backend-computed
+  fields a REST-fetched `GameEventOut` already has). Replay
+  (`loadReplay`) and the Review tab use the authoritative backend-computed
+  `notable`/`headline` directly — no duplicated logic needed for those
+  paths, only for the one path that never touches the REST endpoint.
+  Notable events get a distinct highlight (amber background, bold, a ★
+  headline) in both the game event log and the Review tab.
+- **Verified live, not just via mocked tests** (no LLM calls needed —
+  inserted a fake game with real notable/non-notable events directly via
+  the ORM, the same technique used for Phase 6's Review tab
+  verification): confirmed via direct API response that `notable`/
+  `headline` compute correctly, then screenshotted both the Games tab's
+  event log and the Review tab showing the 3 notable events (war
+  declared, siege begins, siege succeeds) visually distinguished from the
+  2 routine ones (hold, build_unit). A real, harmless timing issue
+  surfaced during this check, not a narrative-tagging bug: the frontend's
+  REST calls round-trip to the actual remote Neon database, and two
+  sequential calls (an initial status check, then the detail/events
+  fetch) took longer than a hasty first verification script's fixed wait
+  allowed — diagnosed by temporarily adding step-by-step console logging
+  to confirm every call *did* eventually resolve, just slower than
+  guessed, not a real hang. No code change was needed; only the test
+  script's wait times were.
+- `tests/test_backend.py`: a `declare_war` event end-to-end through the
+  real API is flagged notable, and the existing elimination test's
+  decisive-siege-battle event is confirmed notable with the right
+  headline. 173/173 tests pass.
+
+This closes the 11-stage gameplay-depth rollout (Stages 1-11), each
+landing as its own validated commit in dependency order exactly as
+planned back in Stage 1 — see the roadmap at the top of this section.
 
 ## Multi-level agent hierarchy (done, separate from the gameplay-depth
 ## rollout above — an agent-architecture change, not a game mechanic)

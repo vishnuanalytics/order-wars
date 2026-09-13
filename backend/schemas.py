@@ -159,6 +159,12 @@ class GameEventOut(BaseModel):
     payload: dict
     eval_scores: list[EvalScoreOut] = []
     annotations: list[AnnotationOut] = []
+    # Computed at serve time from game.narrative.classify_event, not a
+    # stored column — see backend/main.py's get_game_events. Not part of
+    # `from_attributes`'s direct ORM mapping since GameEvent has no such
+    # columns; the route constructs these explicitly per event.
+    notable: bool = False
+    headline: str | None = None
 
     model_config = {"from_attributes": True}
 

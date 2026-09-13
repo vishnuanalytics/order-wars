@@ -255,6 +255,13 @@ form input[type="number"] {
   padding: 0.3rem 0.2rem;
   border-bottom: 1px solid var(--border);
 }
+/* Stage 11 narrative tagging — a notable moment (siege, rebellion, war,
+   trade/alliance/tribute agreed, call to arms) stands out from routine
+   hold/build_unit rows without needing a separate "story" view. */
+.event-log li.notable-event {
+  font-weight: 600;
+  background: #fff3cd;
+}
 
 .fatal-error {
   padding: 2rem;
@@ -278,8 +285,22 @@ form input[type="number"] {
   margin-bottom: 0.5rem;
   font-size: 0.82rem;
 }
+.review-event.notable-event {
+  border-color: #ffe08a;
+  background: #fffaf0;
+}
 .review-event-header {
   margin-bottom: 0.2rem;
+}
+.notable-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #fff3cd;
+  color: #7a5c00;
 }
 .review-event-rationale {
   color: var(--text-muted);

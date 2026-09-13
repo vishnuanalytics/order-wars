@@ -67,6 +67,11 @@ annotate individual turns.
 - [x] Phase 4 — connect agents to the map (`agents/`, `game/`)
 - [x] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
 - [x] Phase 6 — eval + annotation (`eval/`)
+- [x] Phase 7 — gameplay depth (terrain, naval movement, multi-resource
+      economy, unit composition, sieges, supply lines, rebellion, province
+      development, trade, tribute, coalition wars, narrative event tagging)
+      and a full multi-level agent hierarchy (strategic leader + a
+      dispatched military/economic/diplomatic specialist per turn)
 
 See `claude.md` for what each phase covers and the "Progress log" for what's
 landed so far.

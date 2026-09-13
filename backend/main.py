@@ -44,6 +44,7 @@ from db.models import (
 )
 from db.session import get_sessionmaker
 from eval.run_eval import run_eval
+from game.narrative import classify_event
 from game.run_game import ScenarioNotFoundError, create_game, play_game
 from map_data.loader import PROVINCES_PATH
 
@@ -250,8 +251,8 @@ def get_game_events(
     limit: int = 100,
     offset: int = 0,
     session: Session = Depends(get_session),
-) -> list[GameEvent]:
-    return (
+) -> list[GameEventOut]:
+    events = (
         session.query(GameEvent)
         .filter_by(game_id=game_id)
         .order_by(GameEvent.turn, GameEvent.created_at)
@@ -259,6 +260,16 @@ def get_game_events(
         .limit(limit)
         .all()
     )
+    # notable/headline aren't stored columns — see game.narrative's
+    # docstring for why this is computed at serve time instead.
+    result = []
+    for event in events:
+        tag = classify_event(event.event_type, event.payload)
+        out = GameEventOut.model_validate(event)
+        out.notable = tag.notable
+        out.headline = tag.headline
+        result.append(out)
+    return result
 
 
 @app.post("/games/{game_id}/evaluate", response_model=list[EvalRunResultOut])
