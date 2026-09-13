@@ -1036,10 +1036,19 @@ silently dropped scope.
   fallback) and for `_decide_action`'s schema-to-domain wiring. 118/118
   tests pass, all mocked/direct — no live LLM calls needed to build or
   verify this (pure prompt/schema/dispatch logic).
-- Not yet live-verified: the three new prompts/schemas parsing cleanly
-  against a real model (Groq/OpenRouter/Anthropic) hasn't been checked
-  this session — flagged for whenever LLM quota is confirmed available,
-  not assumed safe just because the mocked tests pass.
+- **Verified live** (`python -m agents.graph`, 3 factions/3 turns, real
+  Groq/OpenRouter/Anthropic fallback chain, no DB persistence in this demo
+  path): zero schema parsing errors or truncation across all three
+  specialist schemas. The rotation and override logic both worked exactly
+  as designed against real model output — Rome (expansionist) went
+  military → economic → diplomatic and Gaul (isolationist) went economic →
+  military → diplomatic, both matching their configured order exactly;
+  Carthage (warmonger, configured `[military, diplomatic, economic]`) went
+  military → diplomatic → **diplomatic again** on turn 3 (not the
+  "economic" its rotation would suggest) because Rome proposed an alliance
+  to it that same round — the incoming-proposal override correctly
+  preempted the rotation, and Carthage (true to its warmonger prompt)
+  responded by declaring war instead of accepting.
 
 ## Non-goals
 
