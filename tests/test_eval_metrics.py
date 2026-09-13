@@ -6,7 +6,7 @@ from deepeval.metrics.g_eval.schema import ReasonScore
 from deepeval.models.base_model import DeepEvalBaseLLM
 from deepeval.test_case import LLMTestCase
 
-from eval.metrics import LegalActionMetric, build_role_alignment_metric
+from eval.metrics import LegalActionMetric, ResourceEfficiencyMetric, build_role_alignment_metric
 
 
 def test_legal_action_metric_scores_a_legal_action_as_1():
@@ -22,6 +22,47 @@ def test_legal_action_metric_scores_a_sanitized_action_as_0():
     assert metric.measure(tc) == 0.0
     assert metric.is_successful() is False
     assert "sanitized" in metric.reason.lower()
+
+
+def test_resource_efficiency_metric_scores_a_successful_action_as_1():
+    tc = LLMTestCase(input="n/a", actual_output="build_unit: build a legion (built 1 legion)")
+    metric = ResourceEfficiencyMetric()
+    assert metric.measure(tc) == 1.0
+    assert metric.is_successful() is True
+
+
+def test_resource_efficiency_metric_scores_a_lacked_resources_attempt_as_0():
+    tc = LLMTestCase(
+        input="n/a", actual_output="build_unit: build a legion (tried to build a legion but lacked 10 gold)"
+    )
+    metric = ResourceEfficiencyMetric()
+    assert metric.measure(tc) == 0.0
+    assert metric.is_successful() is False
+    assert "insufficient resources" in metric.reason.lower()
+
+
+def test_resource_efficiency_metric_scores_a_wrong_owner_develop_as_0():
+    tc = LLMTestCase(
+        input="n/a",
+        actual_output="develop_province -> Italy 5: fortify (cannot develop 'Italy 5': not your territory)",
+    )
+    metric = ResourceEfficiencyMetric()
+    assert metric.measure(tc) == 0.0
+
+
+def test_resource_efficiency_metric_scores_an_already_maxed_develop_as_0():
+    tc = LLMTestCase(
+        input="n/a",
+        actual_output="develop_province -> Italy 5: fortify (Italy 5 is already at maximum development)",
+    )
+    metric = ResourceEfficiencyMetric()
+    assert metric.measure(tc) == 0.0
+
+
+def test_resource_efficiency_metric_ignores_non_economic_actions():
+    tc = LLMTestCase(input="n/a", actual_output="hold: nothing to do this turn (held position)")
+    metric = ResourceEfficiencyMetric()
+    assert metric.measure(tc) == 1.0
 
 
 class _FakeEvalLLM(DeepEvalBaseLLM):

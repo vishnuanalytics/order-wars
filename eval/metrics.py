@@ -1,11 +1,15 @@
 """Custom DeepEval metrics scored against a game's persisted decisions.
 
-Two kinds, deliberately: `LegalActionMetric` is rule-based (no LLM call,
-free, deterministic) — it doesn't need an LLM judge to know whether an
-action was sanitized, since `agents/graph.py`'s `_sanitize_action` already
-leaves an unambiguous trace in the rationale text. `RoleAlignmentMetric` is
-a judgment call (does this decision fit the faction's stated doctrine?)
-that genuinely needs an LLM, via `GEval`.
+Three metrics, two families: `LegalActionMetric` and `ResourceEfficiencyMetric`
+are both rule-based (no LLM call, free, deterministic) — they read an
+unambiguous marker already left in the persisted text (`_sanitize_action`'s
+"sanitized to hold" for legality; `game/rules.py`'s own failure wording for
+efficiency) rather than needing a judgment call. `RoleAlignmentMetric` is a
+genuine judgment call (does this decision fit the faction's stated
+doctrine?) that needs an LLM, via `GEval` — kept as the only LLM-judged
+metric so evaluating a game doesn't scale its LLM cost with how many
+dimensions are scored (see the project's known Groq/OpenRouter free-tier
+and $0 Anthropic-credit constraints).
 """
 
 from deepeval.metrics import BaseMetric, GEval
@@ -49,6 +53,51 @@ class LegalActionMetric(BaseMetric):
     @property
     def __name__(self) -> str:
         return "Legal Action"
+
+
+# Substrings that appear in game/rules.py's resolution text specifically
+# when a legal action still failed to execute — wrong target ownership,
+# an already-maxed province, or insufficient resources. These are actions
+# _sanitize_action never touches (it only guards illegal targets, not
+# affordability or ownership), so this metric is a genuine complement to
+# LegalActionMetric, not a duplicate of it: an action can be perfectly
+# legal and still waste the turn.
+WASTE_MARKERS = ("lacked", "cannot develop", "already at maximum development")
+
+
+class ResourceEfficiencyMetric(BaseMetric):
+    """1.0 if a legal action actually executed as intended; 0.0 if it was a
+    legal but wasted attempt — proposing a build/development the faction
+    couldn't afford, or targeting a province it doesn't own. Rule-based,
+    same precedent as LegalActionMetric: this is a fact drawn from
+    game/rules.py's own resolution text, not a judgment call.
+    """
+
+    def __init__(self, threshold: float = 1.0):
+        self.threshold = threshold
+
+    def measure(self, test_case: LLMTestCase, *args, **kwargs) -> float:
+        lowered = test_case.actual_output.lower()
+        wasted = any(marker in lowered for marker in WASTE_MARKERS)
+        self.score = 0.0 if wasted else 1.0
+        self.reason = (
+            "Action was legal but failed to execute — insufficient resources "
+            "or an invalid target wasted the turn."
+            if wasted
+            else "Action executed as intended (or wasn't an economic action)."
+        )
+        self.success = self.is_successful()
+        return self.score
+
+    async def a_measure(self, test_case: LLMTestCase, *args, **kwargs) -> float:
+        return self.measure(test_case, *args, **kwargs)
+
+    def is_successful(self) -> bool:
+        return self.score is not None and self.score >= self.threshold
+
+    @property
+    def __name__(self) -> str:
+        return "Resource Efficiency"
 
 
 def build_role_alignment_metric(model: DeepEvalBaseLLM, threshold: float = 0.5) -> GEval:

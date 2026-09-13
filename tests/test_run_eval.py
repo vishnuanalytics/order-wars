@@ -110,13 +110,13 @@ def test_run_eval_scores_every_faction_scoped_event(sqlite_sessionmaker):
 
     results = run_eval(game_id, session_factory=sqlite_sessionmaker)
 
-    # 2 faction-scoped events x 2 metrics = 4 (the faction_id=None tick event skipped)
-    assert len(results) == 4
+    # 2 faction-scoped events x 3 metrics = 6 (the faction_id=None tick event skipped)
+    assert len(results) == 6
     metric_names = {r["metric_name"] for r in results}
-    assert metric_names == {"Legal Action", "Role Alignment"}
+    assert metric_names == {"Legal Action", "Resource Efficiency", "Role Alignment"}
 
     with sqlite_sessionmaker() as session:
-        assert session.query(EvalScore).count() == 4
+        assert session.query(EvalScore).count() == 6
 
 
 def test_run_eval_legal_action_metric_distinguishes_sanitized_actions(sqlite_sessionmaker):
@@ -128,6 +128,30 @@ def test_run_eval_legal_action_metric_distinguishes_sanitized_actions(sqlite_ses
     legal_scores = {r["turn"]: r["score"] for r in results if r["metric_name"] == "Legal Action"}
     assert legal_scores[1] == 1.0  # the real move_army
     assert legal_scores[2] == 0.0  # the sanitized-to-hold action
+
+
+def test_run_eval_resource_efficiency_metric_flags_a_wasted_attempt(sqlite_sessionmaker):
+    with sqlite_sessionmaker() as session:
+        game_id, faction_id = _seed_game(session)
+        session.add(
+            GameEvent(
+                game_id=game_id,
+                turn=3,
+                faction_id=faction_id,
+                event_type="build_unit",
+                payload={
+                    "rationale": "Build a legion.",
+                    "resolution": "tried to build a legion but lacked 10 gold",
+                },
+            )
+        )
+        session.commit()
+
+    results = run_eval(game_id, session_factory=sqlite_sessionmaker)
+
+    efficiency_scores = {r["turn"]: r["score"] for r in results if r["metric_name"] == "Resource Efficiency"}
+    assert efficiency_scores[1] == 1.0  # the real move_army executed
+    assert efficiency_scores[3] == 0.0  # legal build that failed for lack of resources
 
 
 def test_run_eval_role_alignment_uses_the_mocked_model(sqlite_sessionmaker):

@@ -18,7 +18,7 @@ from agents.roles import describe
 from db.models import EvalScore, Game, GameEvent, GameFaction
 from db.session import get_sessionmaker, scoped_session
 from eval.llm_wrapper import DeepEvalLLM
-from eval.metrics import LegalActionMetric, build_role_alignment_metric
+from eval.metrics import LegalActionMetric, ResourceEfficiencyMetric, build_role_alignment_metric
 
 
 def _build_test_case(event: GameEvent, faction: GameFaction) -> LLMTestCase:
@@ -49,6 +49,7 @@ def run_eval(
     model = DeepEvalLLM()
     role_alignment_metric = build_role_alignment_metric(model)
     legal_action_metric = LegalActionMetric()
+    resource_efficiency_metric = ResourceEfficiencyMetric()
 
     results = []
     with scoped_session(session_factory) as session:
@@ -70,7 +71,7 @@ def run_eval(
             faction = factions_by_id[event.faction_id]
             test_case = _build_test_case(event, faction)
 
-            for metric in (legal_action_metric, role_alignment_metric):
+            for metric in (legal_action_metric, resource_efficiency_metric, role_alignment_metric):
                 metric.measure(test_case)
                 session.add(
                     EvalScore(
@@ -111,8 +112,11 @@ if __name__ == "__main__":
 
     if scored:
         legal_scores = [r["score"] for r in scored if r["metric_name"] == "Legal Action"]
+        efficiency_scores = [r["score"] for r in scored if r["metric_name"] == "Resource Efficiency"]
         role_scores = [r["score"] for r in scored if r["metric_name"] == "Role Alignment"]
         if legal_scores:
             print(f"\nLegal Action rate: {sum(legal_scores) / len(legal_scores):.0%}")
+        if efficiency_scores:
+            print(f"Resource Efficiency rate: {sum(efficiency_scores) / len(efficiency_scores):.0%}")
         if role_scores:
             print(f"Role Alignment average: {sum(role_scores) / len(role_scores):.2f}")

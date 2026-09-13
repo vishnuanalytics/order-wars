@@ -376,16 +376,18 @@ def test_evaluate_game_scores_events_and_persists(client):
     response = client.post(f"/games/{game_id}/evaluate")
     assert response.status_code == 200
     results = response.json()
-    # 1 turn x 2 factions x 2 metrics ("hold" is always legal, and the fake
-    # eval model always returns 8.0/10 = 0.8 for Role Alignment)
-    assert len(results) == 4
-    assert {r["metric_name"] for r in results} == {"Legal Action", "Role Alignment"}
+    # 1 turn x 2 factions x 3 metrics ("hold" is always legal and never a
+    # wasted economic attempt, and the fake eval model always returns
+    # 8.0/10 = 0.8 for Role Alignment)
+    assert len(results) == 6
+    assert {r["metric_name"] for r in results} == {"Legal Action", "Resource Efficiency", "Role Alignment"}
     assert all(r["metric_name"] != "Legal Action" or r["score"] == 1.0 for r in results)
+    assert all(r["metric_name"] != "Resource Efficiency" or r["score"] == 1.0 for r in results)
     assert all(r["metric_name"] != "Role Alignment" or r["score"] == 0.8 for r in results)
 
     # Scores show up on the event when fetched afterward.
     events = client.get(f"/games/{game_id}/events").json()
-    assert all(len(e["eval_scores"]) == 2 for e in events)
+    assert all(len(e["eval_scores"]) == 3 for e in events)
 
 
 def test_evaluate_game_404_for_unknown_game(client):
