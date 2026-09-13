@@ -57,3 +57,11 @@ export function evaluateGame(gameId) {
 export function createAnnotation(eventId, payload) {
   return request(`/events/${eventId}/annotations`, { method: "POST", body: JSON.stringify(payload) });
 }
+
+export function getGameDiplomacy(gameId) {
+  return request(`/games/${gameId}/diplomacy`);
+}
+
+export function getRolePresetInsights() {
+  return request("/insights/role-presets");
+}

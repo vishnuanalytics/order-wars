@@ -175,3 +175,35 @@ class EvalRunResultOut(BaseModel):
     metric_name: str
     score: float
     success: bool | None
+
+
+class DiplomaticRelationOut(BaseModel):
+    """The current (latest turn_changed) status between one pair of
+    factions in one game. Neutral pairs are omitted by the route — see
+    backend/main.py's get_game_diplomacy — since a panel showing every
+    N-choose-2 pair, mostly neutral, would be noise rather than signal.
+    """
+
+    faction_a_id: uuid.UUID
+    faction_a_name: str
+    faction_b_id: uuid.UUID
+    faction_b_name: str
+    status: str
+    turn_changed: int
+
+
+class RolePresetMetricOut(BaseModel):
+    """One (role_preset, metric_name) cell of the cross-game insights
+    table — averaged over every scored decision any faction with that role
+    preset has made, across every game that's been evaluated so far.
+    """
+
+    role_preset: str
+    metric_name: str
+    avg_score: float
+    sample_count: int
+
+
+class InsightsOut(BaseModel):
+    games_analyzed: int
+    role_presets: list[RolePresetMetricOut]

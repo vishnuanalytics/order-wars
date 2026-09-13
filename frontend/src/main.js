@@ -6,6 +6,7 @@ import { MapView } from "./mapView.js";
 import { ScenarioEditor } from "./scenarioEditor.js";
 import { GameView } from "./gameView.js";
 import { ReviewView } from "./reviewView.js";
+import { InsightsView } from "./insightsView.js";
 import { Tour } from "./tour.js";
 
 function switchTab(name) {
@@ -20,6 +21,8 @@ async function main() {
 
   const reviewView = new ReviewView();
   await reviewView.refreshGameList();
+
+  const insightsView = new InsightsView();
 
   const gameView = new GameView({
     mapView,
@@ -84,6 +87,7 @@ async function main() {
     button.addEventListener("click", () => {
       switchTab(button.dataset.tab);
       if (button.dataset.tab === "review") reviewView.refreshGameList();
+      if (button.dataset.tab === "insights") insightsView.refresh();
     });
   });
 

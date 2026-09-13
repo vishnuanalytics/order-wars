@@ -23,6 +23,7 @@
             <button class="tab-button active" data-tab="scenario">Scenario</button>
             <button class="tab-button" data-tab="games">Games</button>
             <button class="tab-button" data-tab="review">Review</button>
+            <button class="tab-button" data-tab="insights">Insights</button>
           </nav>
 
           <section id="tab-scenario" class="tab-panel active">
@@ -103,6 +104,18 @@
             </div>
 
             <div id="review-events"></div>
+          </section>
+
+          <section id="tab-insights" class="tab-panel">
+            <h2>Insights</h2>
+            <p class="review-intro">
+              A cross-game view: how does each role preset tend to score,
+              averaged over every decision any faction with that preset has
+              made in any evaluated game so far? This is what actually
+              answers "does the Warmonger really play less legally than the
+              Diplomat-Trader" — not just in one playthrough.
+            </p>
+            <div id="insights-content"></div>
           </section>
         </aside>
       </main>

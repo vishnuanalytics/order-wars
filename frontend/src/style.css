@@ -337,6 +337,70 @@ form input[type="number"] {
   height: 100%;
   opacity: 0.75;
 }
+
+.diplomacy-panel {
+  margin-top: 0.6rem;
+}
+.diplomacy-panel h4 {
+  margin: 0 0 0.3rem;
+  font-size: 0.82rem;
+}
+.diplomacy-panel ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.78rem;
+}
+.diplomacy-panel li {
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  margin-bottom: 0.25rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+.diplomacy-panel li.diplomacy-war {
+  background: #f8d7da;
+  color: #7a1f27;
+}
+.diplomacy-panel li.diplomacy-truce {
+  background: #fff3cd;
+  color: #7a5c00;
+}
+.diplomacy-panel li.diplomacy-alliance {
+  background: #d4edda;
+  color: #14532d;
+}
+.diplomacy-turn {
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.insights-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+}
+.insights-table th,
+.insights-table td {
+  text-align: left;
+  padding: 0.35rem 0.4rem;
+  border-top: 1px solid var(--border);
+}
+.insights-table thead th {
+  border-top: none;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.insights-table tbody th {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.insights-sample-count {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
 .swatch {
   display: inline-block;
   width: 0.8rem;

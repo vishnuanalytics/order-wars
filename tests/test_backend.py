@@ -4,6 +4,8 @@ to run synchronously — no live LLM/Neon calls, and no waiting on background
 threads to observe results deterministically.
 """
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -14,7 +16,7 @@ from agents import graph as graph_module
 from agents.actions import FactionAction
 from backend.game_hub import hub
 from backend.main import _default_session_factory, app
-from db.models import Base
+from db.models import Base, DiplomaticRelation, DiplomaticStatus, EvalScore
 from eval import llm_wrapper as eval_llm_wrapper_module
 from game import run_game as run_game_module
 
@@ -393,6 +395,93 @@ def test_evaluate_game_scores_events_and_persists(client):
 def test_evaluate_game_404_for_unknown_game(client):
     response = client.post("/games/00000000-0000-0000-0000-000000000000/evaluate")
     assert response.status_code == 404
+
+
+def test_get_game_diplomacy_returns_only_the_latest_non_neutral_status(client, sqlite_sessionmaker):
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+    game = client.get(f"/games/{game_id}").json()
+    rome_id = next(f["id"] for f in game["factions"] if f["faction_name"] == "Rome")
+    carthage_id = next(f["id"] for f in game["factions"] if f["faction_name"] == "Carthage")
+
+    with sqlite_sessionmaker() as session:
+        # Two rows for the same pair — the endpoint should return only the
+        # one with the higher turn_changed (truce superseded by war).
+        session.add_all(
+            [
+                DiplomaticRelation(
+                    game_id=uuid.UUID(game_id), faction_a_id=uuid.UUID(rome_id), faction_b_id=uuid.UUID(carthage_id),
+                    status=DiplomaticStatus.TRUCE, turn_changed=1,
+                ),
+                DiplomaticRelation(
+                    game_id=uuid.UUID(game_id), faction_a_id=uuid.UUID(rome_id), faction_b_id=uuid.UUID(carthage_id),
+                    status=DiplomaticStatus.WAR, turn_changed=2,
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.get(f"/games/{game_id}/diplomacy")
+    assert response.status_code == 200
+    relations = response.json()
+    assert len(relations) == 1
+    assert relations[0]["status"] == "war"
+    assert relations[0]["turn_changed"] == 2
+    assert {relations[0]["faction_a_name"], relations[0]["faction_b_name"]} == {"Rome", "Carthage"}
+
+
+def test_get_game_diplomacy_omits_neutral_pairs(client, sqlite_sessionmaker):
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+    game = client.get(f"/games/{game_id}").json()
+    rome_id = game["factions"][0]["id"]
+    carthage_id = game["factions"][1]["id"]
+
+    with sqlite_sessionmaker() as session:
+        session.add(
+            DiplomaticRelation(
+                game_id=uuid.UUID(game_id), faction_a_id=uuid.UUID(rome_id), faction_b_id=uuid.UUID(carthage_id),
+                status=DiplomaticStatus.NEUTRAL, turn_changed=0,
+            )
+        )
+        session.commit()
+
+    assert client.get(f"/games/{game_id}/diplomacy").json() == []
+
+
+def test_get_game_diplomacy_404_for_unknown_game(client):
+    response = client.get("/games/00000000-0000-0000-0000-000000000000/diplomacy")
+    assert response.status_code == 404
+
+
+def test_role_preset_insights_aggregates_across_games(client, sqlite_sessionmaker):
+    # 2 turns so Rome ("expansionist" in AD_HOC_FACTIONS) acts twice,
+    # giving two events to score on the same metric — makes the average
+    # checkable by hand.
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 2}).json()["game_id"]
+    game = client.get(f"/games/{game_id}").json()
+    rome_id = next(f["id"] for f in game["factions"] if f["faction_name"] == "Rome")
+    events = client.get(f"/games/{game_id}/events").json()
+    rome_event_ids = [e["id"] for e in events if e["faction_id"] == rome_id]
+    assert len(rome_event_ids) == 2
+
+    with sqlite_sessionmaker() as session:
+        for event_id, score in zip(rome_event_ids, [1.0, 0.5]):
+            session.add(
+                EvalScore(game_event_id=uuid.UUID(event_id), metric_name="Legal Action", score=score, success=True)
+            )
+        session.commit()
+
+    response = client.get("/insights/role-presets")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["games_analyzed"] == 1
+    row = next(r for r in body["role_presets"] if r["role_preset"] == "expansionist" and r["metric_name"] == "Legal Action")
+    assert row["sample_count"] == 2
+    assert row["avg_score"] == pytest.approx(0.75)
+
+
+def test_role_preset_insights_empty_when_nothing_evaluated(client):
+    body = client.get("/insights/role-presets").json()
+    assert body == {"games_analyzed": 0, "role_presets": []}
 
 
 def test_create_and_fetch_annotation(client):

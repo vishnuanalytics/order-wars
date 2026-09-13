@@ -11,6 +11,7 @@ background thread via `backend.game_hub.hub` so the request doesn't block;
 import asyncio
 import os
 import uuid
+from collections import defaultdict
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -23,6 +24,7 @@ from backend.schemas import (
     AdHocFactionIn,
     AnnotationCreate,
     AnnotationOut,
+    DiplomaticRelationOut,
     EvalRunResultOut,
     FactionStateOut,
     GameCreate,
@@ -30,14 +32,20 @@ from backend.schemas import (
     GameEventOut,
     GameOut,
     GameSummaryOut,
+    InsightsOut,
+    RolePresetMetricOut,
     ScenarioCreate,
     ScenarioOut,
 )
 from db.models import (
     Annotation,
+    DiplomaticRelation,
+    DiplomaticStatus,
+    EvalScore,
     FactionStateSnapshot,
     Game,
     GameEvent,
+    GameFaction,
     RolePreset,
     Scenario,
     ScenarioFaction,
@@ -270,6 +278,78 @@ def get_game_events(
         out.headline = tag.headline
         result.append(out)
     return result
+
+
+@app.get("/games/{game_id}/diplomacy", response_model=list[DiplomaticRelationOut])
+def get_game_diplomacy(game_id: uuid.UUID, session: Session = Depends(get_session)) -> list[DiplomaticRelationOut]:
+    game = session.get(Game, game_id)
+    if game is None:
+        raise HTTPException(404, "Game not found")
+
+    # One row per (pair, turn_changed) — the current status for a pair is
+    # whichever row has the highest turn_changed (see DiplomaticRelation's
+    # docstring). Iterating turn_changed ascending and overwriting a dict
+    # keyed by the pair lands on the latest row per pair without a
+    # separate max() query.
+    rows = (
+        session.query(DiplomaticRelation)
+        .filter_by(game_id=game_id)
+        .order_by(DiplomaticRelation.turn_changed)
+        .all()
+    )
+    latest_by_pair: dict[tuple[uuid.UUID, uuid.UUID], DiplomaticRelation] = {}
+    for row in rows:
+        latest_by_pair[(row.faction_a_id, row.faction_b_id)] = row
+
+    faction_names = {faction.id: faction.faction_name for faction in game.factions}
+    return [
+        DiplomaticRelationOut(
+            faction_a_id=row.faction_a_id,
+            faction_a_name=faction_names.get(row.faction_a_id, str(row.faction_a_id)),
+            faction_b_id=row.faction_b_id,
+            faction_b_name=faction_names.get(row.faction_b_id, str(row.faction_b_id)),
+            status=row.status.value,
+            turn_changed=row.turn_changed,
+        )
+        for row in latest_by_pair.values()
+        if row.status != DiplomaticStatus.NEUTRAL
+    ]
+
+
+@app.get("/insights/role-presets", response_model=InsightsOut)
+def get_role_preset_insights(session: Session = Depends(get_session)) -> InsightsOut:
+    """Cross-game view: how does each role preset tend to score, averaged
+    over every decision any faction with that preset has made in any
+    evaluated game? Distinct from a single game's Review tab — this is
+    what actually answers "does the Warmonger preset really play less
+    legally than the Diplomat-Trader, on average?" rather than just in one
+    playthrough. Python-side aggregation, not SQL GROUP BY, matching this
+    project's existing precedent (e.g. _mark_eliminated_factions) for
+    dataset sizes this small — not expected to need a real OLAP query.
+    """
+    rows = (
+        session.query(GameFaction.role_preset, EvalScore.metric_name, EvalScore.score, GameEvent.game_id)
+        .join(GameEvent, EvalScore.game_event_id == GameEvent.id)
+        .join(GameFaction, GameEvent.faction_id == GameFaction.id)
+        .all()
+    )
+
+    scores_by_key: dict[tuple[str, str], list[float]] = defaultdict(list)
+    games_seen: set[uuid.UUID] = set()
+    for role_preset, metric_name, score, game_id in rows:
+        scores_by_key[(role_preset.value, metric_name)].append(score)
+        games_seen.add(game_id)
+
+    role_presets = [
+        RolePresetMetricOut(
+            role_preset=role_preset,
+            metric_name=metric_name,
+            avg_score=sum(scores) / len(scores),
+            sample_count=len(scores),
+        )
+        for (role_preset, metric_name), scores in sorted(scores_by_key.items())
+    ]
+    return InsightsOut(games_analyzed=len(games_seen), role_presets=role_presets)
 
 
 @app.post("/games/{game_id}/evaluate", response_model=list[EvalRunResultOut])

@@ -1,9 +1,9 @@
-/** A short, dismissible first-run walkthrough across the three tabs.
+/** A short, dismissible first-run walkthrough across the tabs.
  *
  * Deliberately not framework-driven (matches the rest of frontend/ — plain
  * DOM, no state library): a fixed overlay + a small card, `_render()` swaps
  * the card's content and re-renders on every step rather than diffing,
- * since the whole thing is at most 5 steps and never stays mounted long.
+ * since the whole thing is at most 6 steps and never stays mounted long.
  *
  * The point isn't just "what does each tab do" (that's mostly guessable
  * from the labels) — it's specifically calling out *why* the Review tab
@@ -21,7 +21,7 @@ const STEPS = [
       "A multi-agent strategy sim: you configure factions, each one run by " +
       "an AI agent with its own role and personality, and watch them " +
       "expand, trade, ally, and go to war over a real map. This tour is " +
-      "four short stops.",
+      "five short stops.",
   },
   {
     tab: "scenario",
@@ -49,6 +49,15 @@ const STEPS = [
       "these metrics mean?” on this tab). Then you add your own " +
       "annotation: a 1-5 rating and a note. That combination — automatic " +
       "scoring plus human judgment — is what “annotation and eval” means here.",
+  },
+  {
+    tab: "insights",
+    title: "4. Insights",
+    body:
+      "A cross-game view: how does each role preset tend to score, " +
+      "averaged over every decision it's made across every evaluated " +
+      "game — not just one playthrough. This is where patterns in agent " +
+      "behavior actually become visible.",
   },
   {
     tab: null,

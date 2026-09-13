@@ -1,4 +1,4 @@
-import { startGame, getGame, getGameEvents, listGames, gameLiveSocketUrl } from "./api.js";
+import { startGame, getGame, getGameDiplomacy, getGameEvents, listGames, gameLiveSocketUrl } from "./api.js";
 import { classifyEvent, escapeHtml } from "./utils.js";
 
 export class GameView {
@@ -117,7 +117,10 @@ export class GameView {
   }
 
   async refreshGameDetail() {
-    const game = await getGame(this.currentGameId);
+    const [game, diplomacy] = await Promise.all([
+      getGame(this.currentGameId),
+      getGameDiplomacy(this.currentGameId),
+    ]);
     this.setStatus(`${game.status} — turn ${game.current_turn}`, game.status);
 
     this.factionNameById = {};
@@ -157,6 +160,28 @@ export class GameView {
         </div>`
       : "";
 
+    // War/truce/alliance status between every faction pair — only the
+    // non-neutral pairs (see backend/main.py's get_game_diplomacy), so an
+    // N-faction game with mostly-neutral relations doesn't drown this in
+    // uninteresting rows.
+    const DIPLOMACY_LABEL = { war: "at war with", truce: "in a truce with", alliance: "allied with" };
+    const diplomacyHtml = diplomacy.length
+      ? `<div class="diplomacy-panel">
+          <h4>Diplomacy</h4>
+          <ul>
+            ${diplomacy
+              .map(
+                (rel) =>
+                  `<li class="diplomacy-${escapeHtml(rel.status)}">
+                    ${escapeHtml(rel.faction_a_name)} ${DIPLOMACY_LABEL[rel.status] || rel.status} ${escapeHtml(rel.faction_b_name)}
+                    <span class="diplomacy-turn">since turn ${rel.turn_changed}</span>
+                  </li>`
+              )
+              .join("")}
+          </ul>
+        </div>`
+      : "";
+
     this.gameDetailEl.innerHTML = `
       ${banner}
       <ul class="faction-summary">
@@ -190,6 +215,7 @@ export class GameView {
           })
           .join("")}
       </ul>
+      ${diplomacyHtml}
     `;
     const reviewButton = this.gameDetailEl.querySelector(".review-this-game-button");
     if (reviewButton) {
