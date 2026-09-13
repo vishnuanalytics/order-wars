@@ -29,6 +29,8 @@ from agents.roles import describe, specialist_order
 from agents.state import FactionState, GameState
 from game.rules import (
     COUNTERS,
+    DEVELOP_BASE_COST,
+    MAX_PROVINCE_DEVELOPMENT,
     REBELLION_DISTANCE_THRESHOLD,
     REBELLION_GRACE_TURNS,
     SIEGE_TURNS_TO_DECIDE,
@@ -186,6 +188,19 @@ def _military_prompt(state: GameState, faction_id: str, move_targets: list[str])
     )
 
 
+def _development_summary(state: GameState, faction_id: str) -> str:
+    owned = territory_of(state, faction_id)
+    parts = []
+    for pid in owned:
+        level = state["province_development"].get(pid, 0)
+        if level >= MAX_PROVINCE_DEVELOPMENT:
+            parts.append(f"{pid} ({name_of(pid)}, level {level}/{MAX_PROVINCE_DEVELOPMENT}, maxed)")
+        else:
+            cost = DEVELOP_BASE_COST * (level + 1)
+            parts.append(f"{pid} ({name_of(pid)}, level {level}/{MAX_PROVINCE_DEVELOPMENT}, {cost} gold to raise)")
+    return "; ".join(parts) if parts else "none"
+
+
 def _economic_prompt(state: GameState, faction_id: str) -> str:
     faction = state["factions"][faction_id]
     return (
@@ -197,6 +212,10 @@ def _economic_prompt(state: GameState, faction_id: str) -> str:
         "terrain: coastal -> gold, plains -> grain, hills -> iron.\n"
         f"To build_unit, choose unit_type: {_unit_options_summary()}. "
         "Defaults to legion if unset.\n"
+        "To develop_province, choose target_province from your own "
+        "territory below — each level raises that province's income and "
+        "defense, and lowers its rebellion risk, permanently.\n"
+        f"Your territory and development levels: {_development_summary(state, faction_id)}\n"
         "Choose this turn's action."
     )
 
@@ -330,6 +349,7 @@ def faction_turn(state: GameState) -> dict:
         "pending_proposals": resolved["pending_proposals"],
         "sieges": resolved["sieges"],
         "province_captured_turn": resolved["province_captured_turn"],
+        "province_development": resolved["province_development"],
         "active_faction_idx": next_idx,
         "turn": next_turn,
         "last_event": last_event,
@@ -425,6 +445,7 @@ def initial_state_for(
         "sieges": {},
         "capitals": capitals,
         "province_captured_turn": {},
+        "province_development": {},
         "rebellion_seed": (
             rebellion_seed if rebellion_seed is not None else random.SystemRandom().getrandbits(32)
         ),

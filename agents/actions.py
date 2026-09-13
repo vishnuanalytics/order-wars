@@ -18,7 +18,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ActionType = Literal["move_army", "build_unit", "negotiate", "declare_war", "hold"]
+ActionType = Literal[
+    "move_army", "build_unit", "develop_province", "negotiate", "declare_war", "hold"
+]
 ProposalType = Literal["truce", "alliance"]
 # Rock-paper-scissors unit composition (see game/rules.py's COUNTERS):
 # cavalry > legion > siege_engine > cavalry.
@@ -38,6 +40,8 @@ class FactionAction(BaseModel):
             "targeted that same province on consecutive turns of your own. "
             "build_unit: spend resources to add a unit of "
             "unit_type (defaults to legion if unset). "
+            "develop_province: spend resources to raise target_province's "
+            "development level by 1 (must be your own territory). "
             "negotiate: propose (or, if target_faction already proposed the "
             "same thing to you, accept) a truce or alliance with "
             "target_faction. declare_war: unilaterally go to war with "
@@ -45,7 +49,8 @@ class FactionAction(BaseModel):
         )
     )
     target_province: str | None = Field(
-        default=None, description="Required for move_army: a real province id."
+        default=None,
+        description="Required for move_army/develop_province: a real province id.",
     )
     target_faction: str | None = Field(
         default=None, description="Required for negotiate/declare_war: another faction's id."
@@ -93,12 +98,14 @@ class MilitaryAction(BaseModel):
 
 
 class EconomicAction(BaseModel):
-    """The economic/logistics agent's decision: build or hold."""
+    """The economic/logistics agent's decision: build, develop, or hold."""
 
-    action_type: Literal["build_unit", "hold"] = Field(
+    action_type: Literal["build_unit", "develop_province", "hold"] = Field(
         description=(
             "build_unit: spend resources to add a unit of unit_type "
-            "(defaults to legion if unset). hold: do nothing notable this turn."
+            "(defaults to legion if unset). develop_province: spend "
+            "resources to raise target_province's development level by 1 "
+            "(must be your own territory). hold: do nothing notable this turn."
         )
     )
     unit_type: UnitType | None = Field(
@@ -108,6 +115,9 @@ class EconomicAction(BaseModel):
             "'legion', 'cavalry', or 'siege_engine'. Defaults to 'legion' "
             "if unset."
         ),
+    )
+    target_province: str | None = Field(
+        default=None, description="Required for develop_province: a real province id you own."
     )
     rationale: str = Field(description="One short sentence explaining the choice.")
 

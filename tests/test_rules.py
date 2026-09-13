@@ -8,6 +8,9 @@ from agents.actions import UnitType
 from agents.state import FactionState, GameState
 from game.rules import (
     COUNTERS,
+    DEVELOP_BASE_COST,
+    DEVELOPMENT_DEFENSE_BONUS_PER_LEVEL,
+    MAX_PROVINCE_DEVELOPMENT,
     REBELLION_DISTANCE_THRESHOLD,
     REBELLION_GRACE_TURNS,
     SIEGE_TURNS_TO_DECIDE,
@@ -62,6 +65,7 @@ def _state(**overrides) -> GameState:
         "sieges": {},
         "capitals": {"rome": HOME, "carthage": FAR_AWAY},
         "province_captured_turn": {},
+        "province_development": {},
         "rebellion_seed": 42,
         "log": [],
     }
@@ -370,6 +374,90 @@ def test_rebellion_only_applies_to_the_owning_factions_own_turn():
     )
     result = resolve_action(state, "carthage", _action("hold"))
     assert FAR_AWAY in result["province_owner"]  # untouched -- not carthage's turn's concern
+
+
+def test_develop_province_raises_level_and_spends_gold():
+    state = _state()  # Rome owns only HOME, 20 starting gold
+    result = resolve_action(state, "rome", _action("develop_province", target_province=HOME))
+    assert result["province_development"][HOME] == 1
+    assert result["factions"]["rome"]["resources"]["gold"] == 20 - DEVELOP_BASE_COST
+    assert "developed" in result["resolution"]
+
+
+def test_develop_province_cost_scales_with_current_level():
+    state = _state(
+        province_development={HOME: 1},
+        factions={"rome": _faction("rome", "Rome", gold=100), "carthage": _faction("carthage", "Carthage")},
+    )
+    result = resolve_action(state, "rome", _action("develop_province", target_province=HOME))
+    assert result["province_development"][HOME] == 2
+    assert result["factions"]["rome"]["resources"]["gold"] == 100 - DEVELOP_BASE_COST * 2
+
+
+def test_develop_province_fails_when_not_owned():
+    state = _state()
+    result = resolve_action(state, "rome", _action("develop_province", target_province=NEIGHBOR))
+    assert NEIGHBOR not in result["province_development"]
+    assert result["factions"]["rome"]["resources"]["gold"] == 20  # unspent
+    assert "not your territory" in result["resolution"]
+
+
+def test_develop_province_fails_at_max_level():
+    state = _state(province_development={HOME: MAX_PROVINCE_DEVELOPMENT})
+    result = resolve_action(state, "rome", _action("develop_province", target_province=HOME))
+    assert result["province_development"][HOME] == MAX_PROVINCE_DEVELOPMENT
+    assert "maximum development" in result["resolution"]
+
+
+def test_develop_province_fails_when_short_on_gold():
+    state = _state(factions={"rome": _faction("rome", "Rome", gold=0), "carthage": _faction("carthage", "Carthage")})
+    result = resolve_action(state, "rome", _action("develop_province", target_province=HOME))
+    assert HOME not in result["province_development"]
+    assert "lacked" in result["resolution"]
+
+
+def test_development_increases_income_yield():
+    state = _state(province_development={HOME: 2})
+    result = resolve_action(state, "rome", _action("hold"))
+    # HOME is plains -> grain; 1 base + 1 bonus/level * 2 levels = 3.
+    assert result["factions"]["rome"]["resources"]["grain"] == 3
+
+
+def test_development_reduces_rebellion_chance():
+    """Same exact setup as the rebellion test that confirms seed=3 triggers
+    at FAR_AWAY/turn=1 (roll 0.1006 < 15%) -- with 1 level of development
+    the effective chance drops to 10% (0.15 - 0.05), so the same roll no
+    longer triggers it."""
+    state = _state(
+        province_owner={HOME: "rome", FAR_AWAY: "rome"},
+        capitals={"rome": HOME},
+        province_captured_turn={FAR_AWAY: 0},
+        province_development={FAR_AWAY: 1},
+        rebellion_seed=3,
+        turn=1,
+    )
+    result = resolve_action(state, "rome", _action("hold"))
+    assert FAR_AWAY in result["province_owner"]  # held despite the same roll that rebelled without development
+
+
+def test_development_adds_defense_bonus_in_decisive_battle():
+    """6 attacking legions vs 5 defending legions on NEIGHBOR (coastal --
+    no terrain bonus): without development the attacker wins outright
+    (6 > 5); with 3 levels of development (1 + 0.1*3 = 1.3x), the
+    defender's effective strength (5 * 1.3 = 6.5) holds -- isolating the
+    development bonus from Stage 4's terrain bonus."""
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        province_development={NEIGHBOR: MAX_PROVINCE_DEVELOPMENT},
+        factions={
+            "rome": _faction("rome", "Rome", legions=6),
+            "carthage": _faction("carthage", "Carthage", legions=5),
+        },
+    )
+    assert MAX_PROVINCE_DEVELOPMENT * DEVELOPMENT_DEFENSE_BONUS_PER_LEVEL >= 0.3  # sanity: enough to flip 6 vs 5
+    result = _besiege(state, "rome", NEIGHBOR)
+    assert result["province_owner"][NEIGHBOR] == "carthage"  # defender held thanks to development
 
 
 def test_unit_type_literal_matches_unit_costs_and_counters():

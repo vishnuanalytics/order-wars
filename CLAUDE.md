@@ -1049,8 +1049,58 @@ predicted.
   pass, no live LLM calls needed (pure rules logic; the only prompt change
   is explanatory text).
 
-Stages 7–11 will each get their own short validation pass against the real
-code before implementation (the same way stages 1-6 needed real data/code
+### Stage 7 — province development (done)
+
+- `agents/actions.py`: new `"develop_province"` action type, added to both
+  `FactionAction.action_type` and `EconomicAction.action_type` (the
+  military/diplomatic specialists never see it — development is the
+  economic/logistics agent's domain). Reuses `FactionAction`'s existing
+  `target_province` field rather than adding a new one.
+- `agents/state.py`: new `GameState.province_development: dict[str, int]`
+  (absent = level 0). Keyed purely by province, not by owner — it
+  deliberately **persists through a change of ownership**: development
+  represents built infrastructure (roads, fortifications, administration),
+  not the previous owner's loyalty, so capturing a well-developed enemy
+  province stays valuable rather than resetting to 0. This was a real
+  design fork (reset-on-capture would arguably be more "realistic" in a
+  scorched-earth sense) resolved in favor of rewarding conquest, not
+  punishing it.
+- `game/rules.py`'s new `develop_province` branch: raises a faction's own
+  province's development level by 1, capped at `MAX_PROVINCE_DEVELOPMENT`
+  (3). Cost scales with the level being bought — `DEVELOP_BASE_COST` (15
+  gold) × (current level + 1) — a deliberate diminishing-returns curve so
+  one province can't cheaply stack indefinitely. "Not your territory" and
+  "already maxed" are handled as graceful no-op resolutions inside
+  `resolve_action` (same precedent as `build_unit`'s "lacked resources"
+  case), not `_sanitize_action` downgrades — unlike `move_army`'s
+  adjacency check, "do you own this province" doesn't need the same
+  prompt-time-computed legal-target-set machinery, and reusing that
+  machinery here would have meant duplicating the "owned" concept between
+  two modules for no real benefit.
+- Development plugs into every mechanic Stages 4-6 built, exactly as
+  planned when this stage was placed after them in the roadmap: each level
+  adds `DEVELOPMENT_YIELD_BONUS_PER_LEVEL` (1) to a province's terrain
+  income (`_apply_income`), subtracts
+  `DEVELOPMENT_REBELLION_REDUCTION_PER_LEVEL` (0.05) from its effective
+  rebellion chance (`_check_rebellions`, floored at 0), and adds
+  `DEVELOPMENT_DEFENSE_BONUS_PER_LEVEL` (0.1) on top of Stage 4's
+  `TERRAIN_DEFENSE_BONUS` during a decisive siege battle there.
+- `agents/graph.py`'s economic specialist prompt gained a
+  `_development_summary()` (each owned province's current level and the
+  gold cost to raise it, derived from live state rather than hardcoded)
+  and an explanation of what `develop_province` does.
+- `tests/test_rules.py`: full coverage of the action itself (raises level,
+  cost scaling, rejected when not owned, rejected at max level, rejected
+  when short on gold) plus one test per downstream effect — income bonus,
+  and two tests that isolate development's contribution from Stage 4's
+  terrain bonus by reusing the *exact* rebellion/combat scenarios from
+  Stages 4 and 6 with development added on top, showing the same roll/
+  matchup that used to rebel/lose now doesn't, because of development
+  specifically. 137/137 tests pass, no live LLM calls needed (pure rules
+  logic; the only prompt change is explanatory text).
+
+Stages 8–11 will each get their own short validation pass against the real
+code before implementation (the same way stages 1-7 needed real data/code
 to calibrate correctly, not just up-front assumptions), landing as their
 own commits in this same order.
 

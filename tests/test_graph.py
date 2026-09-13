@@ -43,6 +43,7 @@ def _state(factions: dict[str, FactionState], province_owner: dict[str, str], **
         "sieges": {},
         "capitals": {"rome": ROME_HOME, "carthage": CARTHAGE_HOME},
         "province_captured_turn": {},
+        "province_development": {},
         "rebellion_seed": 42,
         "last_event": None,
         "log": [],

@@ -30,6 +30,17 @@ instance. `rebellion_seed` itself is picked once per game (a real random
 draw, in `agents/graph.py`'s `initial_state_for`) so different games still
 feel unpredictable — only the per-call resolution is deterministic, not
 the game-to-game outcome.
+
+Province development (`develop_province`) lets a faction invest resources
+into its own territory for a persistent, stacking level (capped at
+MAX_PROVINCE_DEVELOPMENT) that boosts income, reduces rebellion risk, and
+adds a defense bonus there — see DEVELOPMENT_*_PER_LEVEL. Deliberately
+placed after sieges/rebellion (not earlier) so it has real mechanics to
+plug into instead of being a standalone number rewired later. Development
+persists through a change of ownership — capturing a well-developed enemy
+province is valuable, not reset to 0 — since it represents built
+infrastructure (roads, fortifications, administration), not the prior
+owner's loyalty.
 """
 
 import hashlib
@@ -112,6 +123,17 @@ REBELLION_GRACE_TURNS = 3
 REBELLION_DISTANCE_THRESHOLD = 3  # hexes from capital; closer provinces never rebel
 REBELLION_CHANCE_PER_TURN = 0.15
 
+# Province development: a persistent, stacking per-province level (see the
+# module docstring). Cost scales with the level being bought (buying level
+# N+1 costs DEVELOP_BASE_COST * (N+1) gold) so each successive improvement
+# is more expensive — a deliberate diminishing-returns curve, not a flat
+# price that would let one province stack indefinitely for cheap.
+MAX_PROVINCE_DEVELOPMENT = 3
+DEVELOP_BASE_COST = 15  # gold, times (current_level + 1)
+DEVELOPMENT_YIELD_BONUS_PER_LEVEL = 1  # extra terrain-resource income per level
+DEVELOPMENT_REBELLION_REDUCTION_PER_LEVEL = 0.05  # subtracted from REBELLION_CHANCE_PER_TURN
+DEVELOPMENT_DEFENSE_BONUS_PER_LEVEL = 0.1  # added on top of TERRAIN_DEFENSE_BONUS
+
 
 def pair_key(faction_a: str, faction_b: str) -> str:
     """Order-independent key for a pairwise relation between two factions."""
@@ -147,17 +169,20 @@ def _effective_strength(units: dict[str, int], enemy_units: dict[str, int]) -> f
     return strength
 
 
-def _apply_income(faction: FactionState, owned: list[str]) -> None:
+def _apply_income(
+    faction: FactionState, owned: list[str], province_development: dict[str, int]
+) -> None:
     """Applied unconditionally every turn regardless of the faction's chosen
     action (same as before terrain existed) — each owned province adds
-    INCOME_PER_PROVINCE of whatever resource its terrain yields."""
+    INCOME_PER_PROVINCE of whatever resource its terrain yields, plus
+    DEVELOPMENT_YIELD_BONUS_PER_LEVEL per level of development it has."""
     faction["resources"] = dict(faction["resources"])
     for province_id in owned:
         province = get_province(province_id)
         resource = TERRAIN_RESOURCE.get(province.terrain, "gold") if province else "gold"
-        faction["resources"][resource] = (
-            faction["resources"].get(resource, 0) + INCOME_PER_PROVINCE
-        )
+        level = province_development.get(province_id, 0)
+        amount = INCOME_PER_PROVINCE + DEVELOPMENT_YIELD_BONUS_PER_LEVEL * level
+        faction["resources"][resource] = faction["resources"].get(resource, 0) + amount
 
 
 def _apply_supply_attrition(
@@ -193,6 +218,7 @@ def _check_rebellions(
     owned: list[str],
     province_owner: dict[str, str],
     province_captured_turn: dict[str, int],
+    province_development: dict[str, int],
     capital: str | None,
     rebellion_seed: int,
     turn: int,
@@ -207,7 +233,11 @@ def _check_rebellions(
     risk — a province with no capture-turn entry has been held since game
     start (or has already survived its grace period) and is exempt. A
     faction with no recorded capital (shouldn't happen — every faction gets
-    one in `initial_state_for`) never rebels, defensively.
+    one in `initial_state_for`) never rebels, defensively. Each level of
+    development lowers the effective chance by
+    DEVELOPMENT_REBELLION_REDUCTION_PER_LEVEL (floored at 0) — a developed
+    province is administered well enough to resist unrest even before its
+    grace period ends.
     """
     if capital is None:
         return []
@@ -218,7 +248,9 @@ def _check_rebellions(
             continue
         if distance_between(province_id, capital) <= REBELLION_DISTANCE_THRESHOLD:
             continue
-        if _rebellion_roll(rebellion_seed, province_id, turn) < REBELLION_CHANCE_PER_TURN:
+        level = province_development.get(province_id, 0)
+        chance = max(0.0, REBELLION_CHANCE_PER_TURN - DEVELOPMENT_REBELLION_REDUCTION_PER_LEVEL * level)
+        if _rebellion_roll(rebellion_seed, province_id, turn) < chance:
             province_owner.pop(province_id, None)
             province_captured_turn.pop(province_id, None)
             rebelled.append(province_id)
@@ -243,10 +275,11 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
 
     Returns a partial `GameState` update: full replacement values for
     `factions`, `province_owner`, `diplomatic_status`, `pending_proposals`,
-    `sieges`, and `province_captured_turn` (LangGraph has no merge reducer
-    for these dict fields, so a node must return the complete new value,
-    not a patch — see `agents/state.py`), plus `resolution` (a short
-    human-readable string the caller appends to the turn's log line).
+    `sieges`, `province_captured_turn`, and `province_development`
+    (LangGraph has no merge reducer for these dict fields, so a node must
+    return the complete new value, not a patch — see `agents/state.py`),
+    plus `resolution` (a short human-readable string the caller appends to
+    the turn's log line).
     """
     factions = dict(state["factions"])
     faction = dict(factions[faction_id])
@@ -254,18 +287,19 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
     faction["units"] = dict(faction["units"])
 
     owned = territory_of(state, faction_id)
-    _apply_income(faction, owned)
+    _apply_income(faction, owned, state["province_development"])
     _apply_supply_attrition(faction, faction_id, owned, state["sieges"])
 
     province_owner = dict(state["province_owner"])
     diplomatic_status = dict(state["diplomatic_status"])
     pending_proposals = dict(state["pending_proposals"])
+    province_development = dict(state["province_development"])
     sieges = dict(state["sieges"])
     province_captured_turn = dict(state["province_captured_turn"])
     resolution = ""
 
     rebelled = _check_rebellions(
-        faction_id, owned, province_owner, province_captured_turn,
+        faction_id, owned, province_owner, province_captured_turn, province_development,
         state["capitals"].get(faction_id), state["rebellion_seed"], state["turn"],
     )
 
@@ -293,6 +327,23 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         else:
             cost_str = " and ".join(f"{amount} {res}" for res, amount in cost.items())
             resolution = f"tried to build a {unit_type} but lacked {cost_str}"
+
+    elif action.action_type == "develop_province":
+        target_province = action.target_province
+        if target_province is None or target_province not in owned:
+            resolution = f"cannot develop {target_province!r}: not your territory"
+        else:
+            level = province_development.get(target_province, 0)
+            if level >= MAX_PROVINCE_DEVELOPMENT:
+                resolution = f"{target_province} is already at maximum development"
+            else:
+                cost = DEVELOP_BASE_COST * (level + 1)
+                if faction["resources"].get("gold", 0) >= cost:
+                    faction["resources"]["gold"] -= cost
+                    province_development[target_province] = level + 1
+                    resolution = f"developed {target_province} to level {level + 1}"
+                else:
+                    resolution = f"tried to develop {target_province} but lacked {cost} gold"
 
     elif action.action_type == "declare_war":
         target = action.target_faction
@@ -344,7 +395,11 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
                 defender_strength = _effective_strength(defender["units"], faction["units"])
                 province = get_province(target_province)
                 terrain = province.terrain if province else None
-                defender_strength *= 1 + TERRAIN_DEFENSE_BONUS.get(terrain, 0.0)
+                development_level = province_development.get(target_province, 0)
+                defender_strength *= (
+                    1 + TERRAIN_DEFENSE_BONUS.get(terrain, 0.0)
+                    + DEVELOPMENT_DEFENSE_BONUS_PER_LEVEL * development_level
+                )
 
                 sieges.pop(target_province, None)
                 if attacker_strength > defender_strength:
@@ -371,5 +426,6 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         "pending_proposals": pending_proposals,
         "sieges": sieges,
         "province_captured_turn": province_captured_turn,
+        "province_development": province_development,
         "resolution": resolution,
     }

@@ -69,6 +69,12 @@ class GameState(TypedDict):
     captured) is the one of these three that *does* mutate every time
     ownership changes via `move_army`; a province with no entry has been
     held since game start and is exempt from rebellion.
+
+    `province_development` maps a province id to its development level
+    (absent means 0 — undeveloped). Keyed purely by province, not by
+    owner: it deliberately persists through a change of ownership (see
+    `game.rules`'s development docs for why capturing a well-developed
+    province stays valuable rather than resetting).
     """
 
     turn: int
@@ -82,6 +88,7 @@ class GameState(TypedDict):
     sieges: dict[str, dict]
     capitals: dict[str, str]
     province_captured_turn: dict[str, int]
+    province_development: dict[str, int]
     rebellion_seed: int
     last_event: dict | None
     log: Annotated[list[str], operator.add]
