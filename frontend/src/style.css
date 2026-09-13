@@ -45,6 +45,30 @@ body {
   gap: 0.6rem;
 }
 
+.auth-area {
+  display: flex;
+  align-items: center;
+}
+.auth-signed-in {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+}
+.auth-avatar {
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.auth-name {
+  font-weight: 600;
+  max-width: 8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #help-tour-button {
   width: 1.6rem;
   height: 1.6rem;

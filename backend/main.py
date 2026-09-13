@@ -15,18 +15,26 @@ import uuid
 from collections import defaultdict
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from agents.actions import FactionAction
+from backend.auth import (
+    get_current_user_optional,
+    issue_session_token,
+    upsert_user_from_google_claims,
+    verify_google_id_token,
+)
+from backend.deps import _default_session_factory, get_session
 from backend.game_hub import hub
 from backend.schemas import (
     AdHocFactionIn,
     AnnotationCreate,
     AnnotationOut,
+    AuthResultOut,
     DiplomaticRelationOut,
     EvalRunResultOut,
     FactionStateOut,
@@ -35,10 +43,12 @@ from backend.schemas import (
     GameEventOut,
     GameOut,
     GameSummaryOut,
+    GoogleSignInIn,
     InsightsOut,
     RolePresetMetricOut,
     ScenarioCreate,
     ScenarioOut,
+    UserOut,
 )
 from db.models import (
     Annotation,
@@ -52,8 +62,8 @@ from db.models import (
     RolePreset,
     Scenario,
     ScenarioFaction,
+    User,
 )
-from db.session import get_sessionmaker
 from eval.run_eval import run_eval
 from game.narrative import classify_event
 from game.run_game import ScenarioNotFoundError, create_game, play_game
@@ -65,12 +75,15 @@ load_dotenv()
 # The frontend calls this API from a browser on a different origin (its Vite
 # dev server), which needs CORS headers to
 # work at all — without this middleware every request from a page would be
-# silently blocked by the browser. Defaults to "*" (allow any origin): there
-# is no auth/cookie-based session here to protect (see CLAUDE.md
-# Non-goals — auth is explicitly out of scope for this portfolio project),
-# and allow_credentials is left False, so a wildcard origin doesn't expose
-# anything a same-origin request wouldn't. Set CORS_ORIGINS (comma-separated)
-# in .env to restrict this once a specific frontend origin is known.
+# silently blocked by the browser. Defaults to "*" (allow any origin) and
+# allow_credentials stays False — still safe now that Google Sign-In exists
+# (see backend/auth.py's module docstring): auth here is Bearer-token, not
+# cookie-based, so a session token only ever travels because this app's own
+# frontend JS explicitly attaches it. A forged cross-origin request can't
+# read another origin's localStorage to steal it, and allow_credentials=False
+# means the browser won't send/expose cookies here even if a future feature
+# added one. Set CORS_ORIGINS (comma-separated) in .env to restrict this once
+# a specific frontend origin is known.
 _cors_origins = os.environ.get("CORS_ORIGINS", "*")
 app.add_middleware(
     CORSMiddleware,
@@ -87,31 +100,47 @@ app.add_middleware(
 HUMAN_ACTION_TIMEOUT_SECONDS = 45
 
 
-def _default_session_factory() -> sessionmaker[Session]:
-    return get_sessionmaker()
-
-
-def get_session(
-    session_factory: sessionmaker[Session] = Depends(_default_session_factory),
-):
-    """Per-request read/write session — commits on success, always closes.
-    `create_game`/`play_game` below manage their own short-lived sessions
-    instead of reusing this one, since they outlive a single request.
-    """
-    session = session_factory()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+# _default_session_factory/get_session live in backend/deps.py, not here —
+# backend/auth.py needs get_session too, and importing it from main.py
+# would be circular (main.py imports auth.py's routes/dependencies).
+# Re-imported under these same names so every existing route handler's
+# `Depends(get_session)`/`Depends(_default_session_factory)` and every
+# test's `app.dependency_overrides[_default_session_factory]` keep working
+# unchanged — Python imports bind to the same function object, not a copy.
 
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.post("/auth/google", response_model=AuthResultOut)
+def sign_in_with_google(payload: GoogleSignInIn, session: Session = Depends(get_session)) -> AuthResultOut:
+    """The frontend's Google Identity Services callback posts the ID token
+    it got directly from Google here — this is the only place that token
+    is ever seen server-side. Returns this app's own longer-lived session
+    token instead of passing the Google token back, since that one expires
+    in ~1 hour.
+    """
+    try:
+        claims = verify_google_id_token(payload.id_token)
+    except ValueError as exc:
+        raise HTTPException(401, f"Invalid Google ID token: {exc}") from exc
+
+    user = upsert_user_from_google_claims(session, claims)
+    session_token = issue_session_token(user.id)
+    return AuthResultOut(session_token=session_token, user=UserOut.model_validate(user))
+
+
+@app.get("/auth/me", response_model=UserOut)
+def get_current_user_info(
+    authorization: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+) -> User:
+    user = get_current_user_optional(session, authorization)
+    if user is None:
+        raise HTTPException(401, "Not signed in")
+    return user
 
 
 @app.get("/map/provinces")
@@ -130,13 +159,21 @@ def get_cities() -> FileResponse:
 
 
 @app.post("/scenarios", response_model=ScenarioOut, status_code=201)
-def create_scenario(payload: ScenarioCreate, session: Session = Depends(get_session)) -> Scenario:
+def create_scenario(
+    payload: ScenarioCreate,
+    authorization: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+) -> ScenarioOut:
     try:
         role_presets = [RolePreset(f.role_preset) for f in payload.factions]
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
-    scenario = Scenario(name=payload.name, max_turns=payload.max_turns, map_ref=payload.map_ref)
+    current_user = get_current_user_optional(session, authorization)
+    scenario = Scenario(
+        name=payload.name, max_turns=payload.max_turns, map_ref=payload.map_ref,
+        owner_user_id=current_user.id if current_user else None,
+    )
     for faction_in, role_preset in zip(payload.factions, role_presets, strict=True):
         scenario.factions.append(
             ScenarioFaction(
@@ -151,20 +188,37 @@ def create_scenario(payload: ScenarioCreate, session: Session = Depends(get_sess
     session.add(scenario)
     session.flush()
     session.refresh(scenario)
-    return scenario
+    return _scenario_out(scenario, current_user.name if current_user else None)
+
+
+def _scenario_out(scenario: Scenario, owner_name: str | None) -> ScenarioOut:
+    """`owner_name` isn't an ORM column on Scenario (only owner_user_id is)
+    — it's resolved by the caller (a single lookup for one scenario, a
+    batched one for a list) and stitched in here, the same pattern
+    get_game_events already uses for notable/headline.
+    """
+    out = ScenarioOut.model_validate(scenario)
+    out.owner_name = owner_name
+    return out
 
 
 @app.get("/scenarios", response_model=list[ScenarioOut])
-def list_scenarios(session: Session = Depends(get_session)) -> list[Scenario]:
-    return session.query(Scenario).order_by(Scenario.created_at.desc()).all()
+def list_scenarios(session: Session = Depends(get_session)) -> list[ScenarioOut]:
+    scenarios = session.query(Scenario).order_by(Scenario.created_at.desc()).all()
+    owner_ids = {s.owner_user_id for s in scenarios if s.owner_user_id is not None}
+    owner_name_by_id = {
+        u.id: u.name for u in session.query(User).filter(User.id.in_(owner_ids)).all()
+    } if owner_ids else {}
+    return [_scenario_out(s, owner_name_by_id.get(s.owner_user_id)) for s in scenarios]
 
 
 @app.get("/scenarios/{scenario_id}", response_model=ScenarioOut)
-def get_scenario(scenario_id: uuid.UUID, session: Session = Depends(get_session)) -> Scenario:
+def get_scenario(scenario_id: uuid.UUID, session: Session = Depends(get_session)) -> ScenarioOut:
     scenario = session.get(Scenario, scenario_id)
     if scenario is None:
         raise HTTPException(404, "Scenario not found")
-    return scenario
+    owner = session.get(User, scenario.owner_user_id) if scenario.owner_user_id else None
+    return _scenario_out(scenario, owner.name if owner else None)
 
 
 def _as_faction_configs(factions: list[AdHocFactionIn]) -> list[dict]:
@@ -445,18 +499,29 @@ def evaluate_game(
 
 @app.post("/events/{event_id}/annotations", response_model=AnnotationOut, status_code=201)
 def create_annotation(
-    event_id: uuid.UUID, payload: AnnotationCreate, session: Session = Depends(get_session)
+    event_id: uuid.UUID,
+    payload: AnnotationCreate,
+    authorization: str | None = Header(default=None),
+    session: Session = Depends(get_session),
 ) -> Annotation:
     if payload.rating is None and not payload.note:
         raise HTTPException(422, "Provide a rating, a note, or both")
     if session.get(GameEvent, event_id) is None:
         raise HTTPException(404, "Event not found")
 
+    # A signed-in user's real name always wins over whatever the client
+    # sent for created_by — that field exists for genuine attribution, and
+    # letting a signed-in request's body claim a different name would be a
+    # spoofing hole for no real benefit. An anonymous request (no valid
+    # session) keeps working exactly as before this feature existed.
+    current_user = get_current_user_optional(session, authorization)
+    created_by = current_user.name if current_user else payload.created_by
+
     annotation = Annotation(
         game_event_id=event_id,
         rating=payload.rating,
         note=payload.note,
-        created_by=payload.created_by,
+        created_by=created_by,
     )
     session.add(annotation)
     session.flush()

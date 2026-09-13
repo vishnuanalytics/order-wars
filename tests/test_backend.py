@@ -161,6 +161,117 @@ def test_get_cities_returns_real_geojson(client):
     assert len(body["features"]) > 0
 
 
+GOOGLE_CLAIMS = {
+    "sub": "108234098234098234",
+    "email": "player@example.com",
+    "name": "Test Player",
+    "picture": "https://example.com/pic.jpg",
+}
+
+
+def _sign_in(client, monkeypatch, claims=None):
+    """Returns a real session_token from a real (mocked-at-Google-only)
+    POST /auth/google round trip — every auth-dependent test below uses
+    this instead of hand-building a token, so it's also implicitly an
+    end-to-end test of sign-in itself.
+    """
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-not-for-real-use-padded-to-32-bytes")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+    monkeypatch.setattr("backend.main.verify_google_id_token", lambda token: claims or GOOGLE_CLAIMS)
+    response = client.post("/auth/google", json={"id_token": "fake-token-verified-by-the-mock-above"})
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_sign_in_with_google_creates_a_user_and_returns_a_usable_session(client, monkeypatch):
+    body = _sign_in(client, monkeypatch)
+    assert body["user"]["email"] == "player@example.com"
+    assert body["user"]["name"] == "Test Player"
+    token = body["session_token"]
+
+    me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
+    assert me.json()["email"] == "player@example.com"
+
+
+def test_sign_in_twice_with_the_same_google_account_reuses_the_user(client, monkeypatch):
+    first = _sign_in(client, monkeypatch)
+    second = _sign_in(client, monkeypatch)
+    assert first["user"]["id"] == second["user"]["id"]
+
+
+def test_sign_in_with_invalid_google_token_is_401(client, monkeypatch):
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-not-for-real-use-padded-to-32-bytes")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+
+    def _raise(token):
+        raise ValueError("Token expired")
+
+    monkeypatch.setattr("backend.main.verify_google_id_token", _raise)
+    response = client.post("/auth/google", json={"id_token": "garbage"})
+    assert response.status_code == 401
+
+
+def test_get_me_401_without_a_token(client):
+    assert client.get("/auth/me").status_code == 401
+
+
+def test_get_me_401_with_a_bogus_token(client):
+    response = client.get("/auth/me", headers={"Authorization": "Bearer not-a-real-token"})
+    assert response.status_code == 401
+
+
+def test_create_scenario_signed_in_sets_owner(client, monkeypatch):
+    token = _sign_in(client, monkeypatch)["session_token"]
+    payload = {
+        "name": "My Scenario",
+        "factions": [
+            {"faction_name": "Rome", "role_preset": "expansionist", "starting_territory": [ROME_HOME]},
+            {"faction_name": "Carthage", "role_preset": "warmonger", "starting_territory": [ROME_NEIGHBOR]},
+        ],
+    }
+    response = client.post("/scenarios", json=payload, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 201
+    body = response.json()
+    assert body["owner_user_id"] is not None
+    assert body["owner_name"] == "Test Player"
+
+    # Ownership survives a fetch, and shows up in the list too.
+    fetched = client.get(f"/scenarios/{body['id']}").json()
+    assert fetched["owner_name"] == "Test Player"
+    listed = client.get("/scenarios").json()
+    assert any(s["id"] == body["id"] and s["owner_name"] == "Test Player" for s in listed)
+
+
+def test_create_scenario_anonymous_has_no_owner(client):
+    payload = {
+        "name": "Anon Scenario",
+        "factions": [
+            {"faction_name": "Rome", "role_preset": "expansionist", "starting_territory": [ROME_HOME]},
+            {"faction_name": "Carthage", "role_preset": "warmonger", "starting_territory": [ROME_NEIGHBOR]},
+        ],
+    }
+    response = client.post("/scenarios", json=payload)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["owner_user_id"] is None
+    assert body["owner_name"] is None
+
+
+def test_annotation_uses_the_signed_in_users_real_name_not_the_client_payload(client, monkeypatch):
+    token = _sign_in(client, monkeypatch)["session_token"]
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+    event_id = client.get(f"/games/{game_id}/events").json()[0]["id"]
+
+    response = client.post(
+        f"/events/{event_id}/annotations",
+        json={"rating": 4, "note": "Looks reasonable.", "created_by": "someone else entirely"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 201
+    assert response.json()["created_by"] == "Test Player"  # not "someone else entirely"
+
+
 def test_create_and_fetch_scenario(client):
     payload = {
         "name": "Test Scenario",

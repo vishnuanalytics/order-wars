@@ -31,3 +31,11 @@ h3
 fastapi
 uvicorn[standard]
 httpx  # needed by fastapi.testclient.TestClient, not the app itself
+
+# Google Sign-In — see backend/auth.py. google-auth verifies a Google ID
+# token server-side (against Google's own public keys, no network call of
+# ours needed at verify time); pyjwt issues/verifies this app's own
+# longer-lived session token afterward, since a Google ID token itself
+# expires in ~1 hour and isn't meant to be a standing app session.
+google-auth
+pyjwt

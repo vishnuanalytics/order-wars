@@ -50,8 +50,28 @@ class ScenarioOut(BaseModel):
     max_turns: int
     map_ref: str | None
     factions: list[ScenarioFactionOut]
+    owner_user_id: uuid.UUID | None
+    owner_name: str | None = None  # not an ORM column — see main.py's route handler
 
     model_config = {"from_attributes": True}
+
+
+class GoogleSignInIn(BaseModel):
+    id_token: str
+
+
+class UserOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    name: str
+    picture_url: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class AuthResultOut(BaseModel):
+    session_token: str
+    user: UserOut
 
 
 class AdHocFactionIn(BaseModel):

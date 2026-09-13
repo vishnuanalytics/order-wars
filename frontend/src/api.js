@@ -4,11 +4,22 @@
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
+// Set by auth.js whenever sign-in state changes (on load from storage, on
+// sign-in, on sign-out) — kept here rather than auth.js importing this
+// module's `request` directly, so api.js never has to import auth.js back
+// (which would be circular, since auth.js already needs signInWithGoogle
+// from here). Harmless to attach on every request, signed in or not: every
+// route treats a missing/absent Authorization header as anonymous.
+let authToken = null;
+
+export function setAuthToken(token) {
+  authToken = token;
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.detail || `${response.status} ${response.statusText}`);
@@ -76,4 +87,12 @@ export function getGameSnapshots(gameId) {
 
 export function getRolePresetInsights() {
   return request("/insights/role-presets");
+}
+
+export function signInWithGoogle(idToken) {
+  return request("/auth/google", { method: "POST", body: JSON.stringify({ id_token: idToken }) });
+}
+
+export function getCurrentUser() {
+  return request("/auth/me");
 }

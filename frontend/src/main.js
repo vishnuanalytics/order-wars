@@ -2,6 +2,7 @@ import "leaflet/dist/leaflet.css";
 import "./style.css";
 
 import { getCities, getProvinces, getRivers, listScenarios } from "./api.js";
+import { Auth } from "./auth.js";
 import { MapView } from "./mapView.js";
 import { ScenarioEditor } from "./scenarioEditor.js";
 import { GameView } from "./gameView.js";
@@ -15,6 +16,13 @@ function switchTab(name) {
 }
 
 async function main() {
+  // Restores/verifies sign-in and sets api.js's auth token before anything
+  // else fetches — a signed-in reviewer's annotations should be attributed
+  // to them from the very first request, not just ones made after this
+  // finished setting up asynchronously.
+  const auth = new Auth();
+  await auth.init();
+
   const mapView = new MapView("map");
   const [provinces, rivers, cities] = await Promise.all([getProvinces(), getRivers(), getCities()]);
   mapView.loadProvinces(provinces.features);

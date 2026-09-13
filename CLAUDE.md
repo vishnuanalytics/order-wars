@@ -1645,13 +1645,117 @@ this pass was its own live-fire test of the problem it fixes.
   4-province starting clusters, confirmed via direct API/DB query, and
   the hand-add/remove toggle correctly round-tripped. 212/212 tests pass.
 
+### Google Sign-In (done — the one Non-goal reversal in this project)
+
+User-requested directly, with real backend-verified accounts (not a
+decorative button) explicitly confirmed as the scope, and confirmed the
+user already had a Google Cloud OAuth Client ID. Deliberately additive,
+not a wall: nothing in the app requires signing in, and every existing
+no-auth flow (live-play control, gamified annotation, predictions) keeps
+working unchanged for a visitor who never does — signing in only enriches
+ownership/attribution (whose scenario this is, who annotated what).
+
+- New `users` table (`db/models.py`, migration `493bb1b6f7d8`) keyed by
+  Google's `sub` claim specifically, not email — a person's email can
+  change, `sub` is Google's permanent per-account id. `Scenario` gained a
+  nullable `owner_user_id` FK (`ondelete="SET NULL"` — deleting an
+  account shouldn't delete scenarios other people may have started games
+  from). Same class of migration gap this project has hit twice before
+  (see "Persistence"'s Alembic notes): autogenerate left the new FK
+  unnamed, which renders a `downgrade()` that fails outright with no
+  naming convention configured — named it explicitly before it shipped,
+  verified with a real upgrade/downgrade/upgrade round-trip against Neon
+  and `alembic check` reporting zero drift.
+- `backend/auth.py`: `google-auth` verifies a Google ID token server-side
+  (signature, expiry, issuer, and — critically — that its `aud` claim
+  matches this app's own `GOOGLE_CLIENT_ID`, not just any genuine Google
+  token) against Google's own public keys, no outbound call of this app's
+  own needed at verify time. `pyjwt` then issues this app's *own*
+  longer-lived (30-day) session token, since a Google ID token itself
+  expires in ~1 hour and re-prompting sign-in that often would be a bad
+  experience for what's meant to be a lightweight feature, not a bank.
+  Bearer-token, not cookie-based — confirmed this keeps `backend/main.py`'s
+  wide-open CORS (`allow_credentials=False`) safe: a token only ever
+  travels because this app's own frontend JS reads it out of its own
+  localStorage and attaches it explicitly, nothing ambient a forged
+  cross-origin request could ride along on the way a cookie would.
+- `get_current_user_optional` is deliberately *not* a `Depends(...)`-based
+  FastAPI dependency — it takes an already-open `session` as a plain
+  first argument, so a route can call it with the same session it's
+  already using for the rest of the request (e.g. `create_scenario`,
+  `create_annotation`) instead of opening a second one.
+- `backend/deps.py` (new, small): `_default_session_factory`/`get_session`
+  moved out of `backend/main.py` into their own module specifically to
+  avoid a circular import — `backend/auth.py` needs `get_session` too,
+  and `main.py` imports from `auth.py`. Re-exported from `main.py` under
+  the same names so every existing route's `Depends(get_session)` and
+  every test's `app.dependency_overrides[_default_session_factory]` keep
+  working unchanged — Python imports bind to the same function object,
+  not a copy.
+- Signing in doesn't gate anything — it enriches two existing flows:
+  `POST /scenarios` sets `owner_user_id` when signed in (`ScenarioOut`
+  gained a computed `owner_name`, resolved by the route handler the same
+  way `notable`/`headline` already are for `GameEventOut`, not a real
+  column); `POST /events/{id}/annotations` now has a signed-in user's
+  real name always win over whatever `created_by` the client sent —
+  letting a signed-in request's body claim a different name would be a
+  spoofing hole for no real benefit, while an anonymous request keeps
+  working exactly as before this feature existed.
+- **Real bug caught by a test, not by inspection**: a bogus
+  `Authorization` header combined with `SESSION_SECRET` simply not being
+  configured crashed `GET /auth/me` with a 500 instead of answering "not
+  signed in" (401) — `_user_id_from_session_token`'s except clause only
+  caught JWT/parsing errors, not the `RuntimeError` `_session_secret()`
+  raises when unset. Since auth is supposed to be optional everywhere, a
+  server that simply hasn't had sign-in configured yet should serve every
+  request as anonymous, not crash the moment any client happens to send
+  an `Authorization` header — fixed by widening that except clause.
+- `frontend/src/auth.js` (new): loads Google Identity Services dynamically
+  (a plain `<script>` tag, no npm package) only when
+  `VITE_GOOGLE_CLIENT_ID` is actually configured — unset, `#auth-area`
+  renders nothing and the app behaves exactly as before this feature
+  existed. Session state persists in `localStorage` across reloads, and a
+  restored token is re-verified against `GET /auth/me` on load (not just
+  trusted) so a stale/expired one falls back to signed-out instead of
+  showing a signed-in name every subsequent request would then silently
+  fail to actually authenticate as. `frontend/src/api.js` gained a
+  module-level `authToken`/`setAuthToken()` instead of `api.js` importing
+  `auth.js` directly, specifically to avoid the reverse circular import
+  (`auth.js` already needs `signInWithGoogle` from `api.js`) — every
+  request attaches the token when present, harmless for routes that
+  ignore it.
+- Verified live end-to-end against the real dev server and Neon (not just
+  mocked tests): confirmed the app behaves identically with sign-in
+  unconfigured (today's actual `.env` state) — empty `#auth-area`, zero
+  console errors, no regressions, no mobile-width header overflow at
+  400px. Real Google OAuth consent itself can't be verified without a
+  real Google account interactively completing it (not something this
+  session can do, and scripting around Google's own consent screen isn't
+  appropriate) — flagged clearly to the user as the one remaining manual
+  step. Everything else *around* that step was verified for real: seeded
+  a genuine user row and a session token signed with the same
+  `SESSION_SECRET` the live server was running with (the equivalent of a
+  completed Google sign-in, without needing Google's popup), injected it
+  into the frontend's `localStorage`, and confirmed against the real
+  running backend — the signed-in avatar/name/sign-out UI rendered
+  correctly, a scenario created while "signed in" came back with the
+  correct `owner_user_id`/`owner_name` in Postgres, and sign-out cleanly
+  reverted the UI. Test user and scenario cleaned up from Neon afterward.
+  235/235 tests pass.
+
 ## Non-goals
 
 - No live Google Maps API calls in the core game loop (cost/quota, and historical
   factions don't belong on modern road networks).
-- No premature production concerns unrelated to the game itself (auth, deployment,
+- No premature production concerns unrelated to the game itself (deployment,
   scaling, multi-tenant infra) — this is still a portfolio-scale project, just
   built with production-quality code rather than lesson-paced fragments.
+  Auth was on this list too until the user explicitly requested Google
+  Sign-In (see the Progress log entry below) — done as a real,
+  backend-verified feature, not decoratively, but deliberately additive:
+  nothing in the app requires signing in, every existing no-auth flow
+  (live-play control, gamified annotation, predictions) keeps working
+  exactly as before for a visitor who never does.
 - No reliance on fully emergent, unscaffolded multi-agent diplomacy — coalition
   and alliance formation should be rule-triggered (power-balance based), with
   LLM agents handling negotiation content within that scaffold, not expected

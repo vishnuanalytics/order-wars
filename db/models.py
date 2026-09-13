@@ -65,6 +65,32 @@ def _uuid_pk() -> Mapped[uuid.UUID]:
     return mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
 
 
+class User(Base):
+    """A signed-in visitor, identified by Google Sign-In — see backend/auth.py.
+
+    Deliberately the only place "who is this" lives: `google_sub` (Google's
+    own stable, permanent per-account identifier — NOT the email, which a
+    person can change) is what a future sign-in looks up, not name/email/
+    picture, which Google can hand back slightly differently call to call.
+    Signing in is optional everywhere it touches this schema (see
+    CLAUDE.md Non-goals on premature auth) — every FK to this table is
+    nullable, so every existing anonymous/no-auth flow keeps working
+    unchanged for a visitor who never signs in.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    google_sub: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(320))
+    name: Mapped[str] = mapped_column(String(200))
+    picture_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"User(id={self.id!r}, email={self.email!r})"
+
+
 # --------------------------------------------------------------------------
 # Config-time: what the scenario-editor UI writes, before a run exists.
 # --------------------------------------------------------------------------
@@ -80,6 +106,13 @@ class Scenario(Base):
     map_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
     max_turns: Mapped[int] = mapped_column(default=50)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # Nullable: an anonymous/ad-hoc scenario (the common case before this
+    # feature existed, and still fully supported — see User's docstring)
+    # has no owner. SET NULL, not CASCADE: deleting a user's account
+    # shouldn't delete scenarios other people may have started games from.
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     factions: Mapped[list[ScenarioFaction]] = relationship(
         back_populates="scenario", cascade="all, delete-orphan"
