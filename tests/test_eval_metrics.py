@@ -2,7 +2,6 @@
 (a GEval instance) is tested against a fake DeepEvalBaseLLM, never a live one.
 """
 
-from deepeval.metrics.g_eval.schema import ReasonScore
 from deepeval.models.base_model import DeepEvalBaseLLM
 from deepeval.test_case import LLMTestCase
 

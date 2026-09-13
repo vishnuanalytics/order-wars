@@ -2,7 +2,6 @@
 threading.Event — no FastAPI/websocket layer, no timing-based flakiness.
 """
 
-import queue
 import threading
 import time
 

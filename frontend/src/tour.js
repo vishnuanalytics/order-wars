@@ -29,8 +29,9 @@ const STEPS = [
     body:
       "Add factions, give each one a role preset (Expansionist, Warmonger, " +
       "Diplomat-Trader, Isolationist…), set starting resources, and click " +
-      "the map to place each faction's home province. Save it, then start " +
-      "a game from it.",
+      "the map to place each faction's capital — this also claims a small " +
+      "starting territory around it, adjustable by hand. Save it, then " +
+      "start a game from it.",
   },
   {
     tab: "games",

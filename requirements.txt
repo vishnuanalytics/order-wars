@@ -16,8 +16,8 @@ sqlalchemy
 psycopg[binary]
 alembic
 
-# Phase 6 deps (deepeval, ...) are added when we reach that phase — see
-# claude.md "Project phases".
+# Phase 6: DeepEval scoring + annotation — see eval/.
+deepeval
 
 # Phase 3: map/geo generation — see map_data/generate_map.py.
 # Only generate_map.py imports these; the game itself just reads the
