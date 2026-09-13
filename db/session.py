@@ -84,9 +84,15 @@ def get_sessionmaker() -> sessionmaker[Session]:
 
 
 @contextmanager
-def session_scope() -> Iterator[Session]:
-    """Provide a transactional session: commits on success, rolls back on error."""
-    session = get_sessionmaker()()
+def scoped_session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
+    """Transactional session from a given factory: commits on success, rolls
+    back on error. Parameterized (unlike `session_scope` below) so tests
+    (and any module, not just this one) can inject a SQLite sessionmaker
+    instead of always hitting the real Neon database — originally a
+    private copy inside `game/run_game.py`, promoted here once `eval/`
+    needed the identical pattern rather than a third copy.
+    """
+    session = session_factory()
     try:
         yield session
         session.commit()
@@ -95,3 +101,10 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+@contextmanager
+def session_scope() -> Iterator[Session]:
+    """Provide a transactional session: commits on success, rolls back on error."""
+    with scoped_session(get_sessionmaker()) as session:
+        yield session

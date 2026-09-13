@@ -21,6 +21,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.game_hub import hub
 from backend.schemas import (
     AdHocFactionIn,
+    AnnotationCreate,
+    AnnotationOut,
+    EvalRunResultOut,
     FactionStateOut,
     GameCreate,
     GameCreatedOut,
@@ -30,16 +33,25 @@ from backend.schemas import (
     ScenarioCreate,
     ScenarioOut,
 )
-from db.models import FactionStateSnapshot, Game, GameEvent, RolePreset, Scenario, ScenarioFaction
+from db.models import (
+    Annotation,
+    FactionStateSnapshot,
+    Game,
+    GameEvent,
+    RolePreset,
+    Scenario,
+    ScenarioFaction,
+)
 from db.session import get_sessionmaker
+from eval.run_eval import run_eval
 from game.run_game import ScenarioNotFoundError, create_game, play_game
 from map_data.loader import PROVINCES_PATH
 
 app = FastAPI(title="Order Wars API")
 
 load_dotenv()
-# The frontend (Phase 5, not built yet) will call this API from a browser on
-# a different origin (e.g. a Vite dev server), which needs CORS headers to
+# The frontend calls this API from a browser on a different origin (its Vite
+# dev server), which needs CORS headers to
 # work at all — without this middleware every request from a page would be
 # silently blocked by the browser. Defaults to "*" (allow any origin): there
 # is no auth/cookie-based session here to protect (see CLAUDE.md
@@ -247,6 +259,44 @@ def get_game_events(
         .limit(limit)
         .all()
     )
+
+
+@app.post("/games/{game_id}/evaluate", response_model=list[EvalRunResultOut])
+def evaluate_game(
+    game_id: uuid.UUID,
+    session_factory: sessionmaker[Session] = Depends(_default_session_factory),
+) -> list[dict]:
+    """Runs synchronously, unlike POST /games — DeepEval calls against a
+    short game's handful of events take a few seconds, not the minutes a
+    full game loop can take, so there's no need for GameHub's background-
+    thread treatment here. Would need it if games/eval runs grow much
+    longer than this project's current scale.
+    """
+    try:
+        return run_eval(game_id, session_factory=session_factory)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/events/{event_id}/annotations", response_model=AnnotationOut, status_code=201)
+def create_annotation(
+    event_id: uuid.UUID, payload: AnnotationCreate, session: Session = Depends(get_session)
+) -> Annotation:
+    if payload.rating is None and not payload.note:
+        raise HTTPException(422, "Provide a rating, a note, or both")
+    if session.get(GameEvent, event_id) is None:
+        raise HTTPException(404, "Event not found")
+
+    annotation = Annotation(
+        game_event_id=event_id,
+        rating=payload.rating,
+        note=payload.note,
+        created_by=payload.created_by,
+    )
+    session.add(annotation)
+    session.flush()
+    session.refresh(annotation)
+    return annotation
 
 
 @app.websocket("/games/{game_id}/live")

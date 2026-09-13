@@ -19,6 +19,7 @@
           <nav class="tabs">
             <button class="tab-button active" data-tab="scenario">Scenario</button>
             <button class="tab-button" data-tab="games">Games</button>
+            <button class="tab-button" data-tab="review">Review</button>
           </nav>
 
           <section id="tab-scenario" class="tab-panel active">
@@ -60,6 +61,18 @@
             <div id="game-detail"></div>
             <h3>Event log</h3>
             <ul id="event-log" class="event-log"></ul>
+          </section>
+
+          <section id="tab-review" class="tab-panel">
+            <h2>Review</h2>
+            <label>
+              Game
+              <select id="review-game-select"></select>
+            </label>
+            <div class="form-actions">
+              <button type="button" id="run-evaluation-button" disabled>Run evaluation</button>
+            </div>
+            <div id="review-events"></div>
           </section>
         </aside>
       </main>

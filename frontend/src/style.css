@@ -247,3 +247,81 @@ form input[type="number"] {
   color: #7a1f27;
   font-family: monospace;
 }
+
+#review-game-select {
+  display: block;
+  width: 100%;
+  padding: 0.3rem;
+  margin-top: 0.15rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.review-event {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.82rem;
+}
+.review-event-header {
+  margin-bottom: 0.2rem;
+}
+.review-event-rationale {
+  color: var(--text-muted);
+  font-style: italic;
+  margin-bottom: 0.3rem;
+}
+.review-scores {
+  margin-bottom: 0.3rem;
+}
+.score-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  margin-right: 0.25rem;
+  cursor: help;
+}
+.score-badge.score-ok {
+  background: #d4edda;
+  color: #14532d;
+}
+.score-badge.score-low {
+  background: #f8d7da;
+  color: #7a1f27;
+}
+
+.annotation-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.3rem 0;
+}
+.annotation-item {
+  font-size: 0.78rem;
+  padding: 0.15rem 0;
+}
+
+.annotation-form {
+  display: flex;
+  gap: 0.3rem;
+}
+.annotation-form select,
+.annotation-form input {
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+.annotation-form .annotation-note {
+  flex: 1;
+  min-width: 0;
+}
+.annotation-form button {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}

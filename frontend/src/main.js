@@ -5,6 +5,7 @@ import { getProvinces, listScenarios } from "./api.js";
 import { MapView } from "./mapView.js";
 import { ScenarioEditor } from "./scenarioEditor.js";
 import { GameView } from "./gameView.js";
+import { ReviewView } from "./reviewView.js";
 
 function switchTab(name) {
   document.querySelectorAll(".tab-button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
@@ -18,6 +19,9 @@ async function main() {
 
   const gameView = new GameView({ mapView });
   await gameView.refreshGameList();
+
+  const reviewView = new ReviewView();
+  await reviewView.refreshGameList();
 
   const scenarioListEl = document.getElementById("scenario-list");
   const startGameButton = document.getElementById("start-game-button");
@@ -61,6 +65,7 @@ async function main() {
     switchTab("games");
     try {
       await gameView.startFromScenario(selectedScenario.id, selectedScenario.maxTurns);
+      await reviewView.refreshGameList();
     } catch (err) {
       window.alert(`Could not start game: ${err.message}`);
     } finally {
@@ -69,7 +74,10 @@ async function main() {
   });
 
   document.querySelectorAll(".tab-button").forEach((button) => {
-    button.addEventListener("click", () => switchTab(button.dataset.tab));
+    button.addEventListener("click", () => {
+      switchTab(button.dataset.tab);
+      if (button.dataset.tab === "review") reviewView.refreshGameList();
+    });
   });
 }
 

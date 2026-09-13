@@ -205,6 +205,12 @@ class GameEvent(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     game: Mapped[Game] = relationship(back_populates="events")
+    eval_scores: Mapped[list[EvalScore]] = relationship(
+        back_populates="game_event", cascade="all, delete-orphan"
+    )
+    annotations: Mapped[list[Annotation]] = relationship(
+        back_populates="game_event", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"GameEvent(game_id={self.game_id!r}, turn={self.turn}, event_type={self.event_type!r})"
@@ -274,3 +280,59 @@ class DiplomaticRelation(Base):
             f"DiplomaticRelation(game_id={self.game_id!r}, "
             f"{self.faction_a_id!r}<->{self.faction_b_id!r}, status={self.status!r})"
         )
+
+
+# --------------------------------------------------------------------------
+# Phase 6: eval + annotation. Scored/annotated per GameEvent (per decision),
+# not per game — that's the natural grain for "was this specific choice
+# good," and still supports per-game aggregates (average score, legality
+# rate) by joining back through GameEvent.game_id.
+# --------------------------------------------------------------------------
+
+
+class EvalScore(Base):
+    """One DeepEval metric's result for one GameEvent (one faction's one
+    decision). `metric_name` is a plain string, not an enum — like
+    `GameEvent.event_type`, the set of metrics is expected to grow.
+    """
+
+    __tablename__ = "eval_scores"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    game_event_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("game_events.id", ondelete="CASCADE"), index=True
+    )
+    metric_name: Mapped[str] = mapped_column(String(100), index=True)
+    score: Mapped[float] = mapped_column()
+    success: Mapped[bool] = mapped_column()
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    game_event: Mapped[GameEvent] = relationship(back_populates="eval_scores")
+
+    def __repr__(self) -> str:
+        return f"EvalScore(game_event_id={self.game_event_id!r}, metric_name={self.metric_name!r}, score={self.score!r})"
+
+
+class Annotation(Base):
+    """A human reviewer's note on one GameEvent — the "simple annotation UI
+    for human review" CLAUDE.md's Phase 6 calls for. `created_by` is a plain
+    free-text field, not a user FK: this project has no auth system (see
+    Non-goals), so it's whatever the reviewer typed, not an enforced identity.
+    """
+
+    __tablename__ = "annotations"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    game_event_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("game_events.id", ondelete="CASCADE"), index=True
+    )
+    rating: Mapped[int | None] = mapped_column(nullable=True)  # e.g. 1-5, reviewer's own scale
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    game_event: Mapped[GameEvent] = relationship(back_populates="annotations")
+
+    def __repr__(self) -> str:
+        return f"Annotation(game_event_id={self.game_event_id!r}, rating={self.rating!r})"

@@ -193,6 +193,7 @@ actually wired up and verified against the real Neon database in
    "Persistence" as the sole store for game history (no flat-file logs).
 6. **Eval + annotation** — `eval/` — DeepEval custom metrics scored against
    Postgres (see "Persistence"), plus a simple annotation UI for human review.
+   Done — see the Progress log.
 
 Check with the person before starting work in a folder for a phase beyond the current
 one.
@@ -605,7 +606,81 @@ came up.
           screenshot taken ~4s after a game started showed both factions'
           territory correctly colored on the map while `current_turn` was
           still 0 (round 1 in progress).
-- [ ] Phase 6 — eval + annotation
+- [x] Phase 6 — eval + annotation
+  - [x] `eval/llm_wrapper.py`: `DeepEvalLLM(DeepEvalBaseLLM)` wraps the
+        existing Groq -> OpenRouter -> Claude fallback chain (`agents/llm.py`)
+        as DeepEval's judge model, instead of hardcoding a separate one.
+        Uses `method="json_mode"` for structured output — GEval's prompts
+        contain literal "return JSON" text instructions that collide with
+        Groq's tool-calling and raised `groq.BadRequestError: attempted to
+        call tool 'json' which was not in request.tools`; `json_mode` works
+        across all three providers (Anthropic silently falls back to
+        `json_schema` internally, with a harmless warning).
+  - [x] `eval/metrics.py`: two metrics scored per faction-authored
+        `GameEvent` — `LegalActionMetric` (rule-based `BaseMetric`, checks
+        the action wasn't silently sanitized by `game/rules.py`'s
+        `_sanitize_action`) and `Role Alignment` (`GEval`, LLM-judged,
+        scores whether the chosen action fits the faction's assigned role
+        preset). `build_role_alignment_metric()` passes
+        `_include_g_eval_suffix=False` — GEval appends " [GEval]" to its
+        `__name__` by default, which would have silently broken
+        `run_eval.py`'s own summary aggregation (`if metric_name ==
+        "Role Alignment"` would never match). Caught by a test asserting
+        the exact stored `metric_name`, not by inspection.
+  - [x] `eval/run_eval.py` (`python -m eval.run_eval --game-id <id>`, per
+        "Commands"): scores every faction-authored event in a completed
+        game and persists results as `EvalScore` rows, reusing
+        `db.session`'s `scoped_session` (promoted from a private helper
+        in `game/run_game.py` to a shared one, since both now need it).
+        Also reachable from the backend as `POST /games/{id}/evaluate`.
+  - [x] DB: `EvalScore` and `Annotation` tables added via migration
+        `1022ae49fdae`, both FK'd to `game_events` with
+        `cascade="all, delete-orphan"` — deleting a game cascades cleanly
+        through events to their scores/annotations. `Annotation` holds a
+        human reviewer's 1-5 `rating` and/or free-text `note` per event.
+        Migration verified round-trip against real Neon, `alembic check`
+        reports zero drift.
+  - [x] `backend/main.py`: `POST /games/{id}/evaluate` (runs `run_eval`,
+        404 if the game doesn't exist) and `POST /events/{id}/annotations`
+        (422 if neither `rating` nor `note` given, 404 if the event
+        doesn't exist). Also fixed a latent schema bug found along the
+        way: `GameEventOut.faction_id` was typed non-nullable `uuid.UUID`
+        even though the DB column already allows null (some events, like
+        a `stream_end` marker, aren't faction-authored) — now
+        `uuid.UUID | None`.
+  - [x] `frontend/src/reviewView.js`: new "Review" tab — pick a completed
+        game from a dropdown, click "Run evaluation" to trigger real
+        scoring, see each event with color-coded pass/fail score badges
+        (green/red via `.score-ok`/`.score-low`) and an inline annotation
+        form (1-5 rating + note).
+  - [x] Verified live end-to-end: played a real 3-faction, 2-turn game
+        against real Neon/LLMs, ran `eval.run_eval` against it (12 scored
+        event/metric pairs, all persisted and confirmed via direct query),
+        then drove the Review tab with a headless Playwright script
+        against real running `uvicorn`/Vite servers — selected the game,
+        ran evaluation (real LLM calls), confirmed 12 score badges
+        rendered, added a real annotation, and screenshotted every step.
+        All four screenshots inspected visually and confirmed correct —
+        map + sidebar layout holds up at 1400px with no clipping, unlike
+        some of Phase 5's frontend bugs that only showed up this way.
+  - [x] Along the way, found the project's LLM fallback chain was partly
+        broken, unrelated to eval code itself: OpenRouter's free
+        `meta-llama/llama-3.3-70b-instruct:free` (the default in
+        `.env.example`/`agents/llm.py`) is now deprecated and 404s, and
+        the configured Anthropic account has a $0 credit balance (paid
+        fallback silently unusable). Surfaced to the person rather than
+        worked around silently; asked how to proceed and got the go-ahead
+        to research and swap the model. Replaced the OpenRouter default
+        with `nvidia/nemotron-3-super-120b-a12b:free` (checked OpenRouter's
+        public `/api/v1/models` for current free models, tried a couple of
+        candidates live, picked this one — larger model, established lab,
+        confirmed working through the fallback chain 3x in a row). That
+        swap needed one more fix: the new model consumes more
+        reasoning/output tokens than the old one, so `_decide_action`'s
+        `max_tokens` in `agents/graph.py` went from 600 to 900 after a
+        live `openai.LengthFinishReasonError` at 600 confirmed the cause.
+        The Anthropic $0-credit issue is a known limitation, not something
+        code can fix — needs billing credit added to that account.
 
 ## Non-goals
 

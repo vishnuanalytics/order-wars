@@ -49,3 +49,11 @@ export function gameLiveSocketUrl(gameId) {
   const wsBase = API_BASE_URL.replace(/^http/, "ws");
   return `${wsBase}/games/${gameId}/live`;
 }
+
+export function evaluateGame(gameId) {
+  return request(`/games/${gameId}/evaluate`, { method: "POST" });
+}
+
+export function createAnnotation(eventId, payload) {
+  return request(`/events/${eventId}/annotations`, { method: "POST", body: JSON.stringify(payload) });
+}

@@ -15,6 +15,7 @@ from agents.actions import FactionAction
 from backend.game_hub import hub
 from backend.main import _default_session_factory, app
 from db.models import Base
+from eval import llm_wrapper as eval_llm_wrapper_module
 from game import run_game as run_game_module
 
 ROME_HOME = "831e80fffffffff"  # Italy 20
@@ -59,6 +60,22 @@ class _HoldLLM:
         return FactionAction(action_type="hold", rationale="test")
 
 
+class _FakeEvalChatModel:
+    """Stands in for eval/llm_wrapper.py's underlying build_llm() call."""
+
+    def __init__(self, schema=None):
+        self.schema = schema
+
+    def invoke(self, prompt):
+        if self.schema is not None:
+            return self.schema(score=8.0, reason="fits the doctrine")
+
+        class _Response:
+            content = "n/a"
+
+        return _Response()
+
+
 @pytest.fixture(autouse=True)
 def _no_real_llm_or_thread(monkeypatch):
     monkeypatch.setattr(
@@ -67,6 +84,11 @@ def _no_real_llm_or_thread(monkeypatch):
         lambda max_tokens=64, schema=None: (_HoldLLM() if schema is not None else _FakeIntentLLM()),
     )
     monkeypatch.setattr(run_game_module, "require_llm_configured", lambda: None)
+    monkeypatch.setattr(
+        eval_llm_wrapper_module,
+        "build_llm",
+        lambda max_tokens=64, schema=None, structured_output_method=None: _FakeEvalChatModel(schema),
+    )
     # Run the "background" game synchronously so the test can assert on its
     # result immediately after the POST /games response, no polling/sleeping.
     # Mirrors the real GameHub.start's exception handling (catch, don't
@@ -313,6 +335,71 @@ def test_list_games(client):
     client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1})
     client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1})
     assert len(client.get("/games").json()) == 2
+
+
+def test_evaluate_game_scores_events_and_persists(client):
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+
+    response = client.post(f"/games/{game_id}/evaluate")
+    assert response.status_code == 200
+    results = response.json()
+    # 1 turn x 2 factions x 2 metrics ("hold" is always legal, and the fake
+    # eval model always returns 8.0/10 = 0.8 for Role Alignment)
+    assert len(results) == 4
+    assert {r["metric_name"] for r in results} == {"Legal Action", "Role Alignment"}
+    assert all(r["metric_name"] != "Legal Action" or r["score"] == 1.0 for r in results)
+    assert all(r["metric_name"] != "Role Alignment" or r["score"] == 0.8 for r in results)
+
+    # Scores show up on the event when fetched afterward.
+    events = client.get(f"/games/{game_id}/events").json()
+    assert all(len(e["eval_scores"]) == 2 for e in events)
+
+
+def test_evaluate_game_404_for_unknown_game(client):
+    response = client.post("/games/00000000-0000-0000-0000-000000000000/evaluate")
+    assert response.status_code == 404
+
+
+def test_create_and_fetch_annotation(client):
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+    event_id = client.get(f"/games/{game_id}/events").json()[0]["id"]
+
+    response = client.post(
+        f"/events/{event_id}/annotations",
+        json={"rating": 4, "note": "Reasonable given the context.", "created_by": "reviewer@example.com"},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["rating"] == 4
+    assert body["note"] == "Reasonable given the context."
+
+    events = client.get(f"/games/{game_id}/events").json()
+    annotated = next(e for e in events if e["id"] == event_id)
+    assert len(annotated["annotations"]) == 1
+    assert annotated["annotations"][0]["rating"] == 4
+
+
+def test_create_annotation_requires_rating_or_note(client):
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+    event_id = client.get(f"/games/{game_id}/events").json()[0]["id"]
+
+    response = client.post(f"/events/{event_id}/annotations", json={"created_by": "reviewer@example.com"})
+    assert response.status_code == 422
+
+
+def test_create_annotation_404_for_unknown_event(client):
+    response = client.post(
+        "/events/00000000-0000-0000-0000-000000000000/annotations", json={"rating": 3}
+    )
+    assert response.status_code == 404
+
+
+def test_annotation_rating_out_of_range_is_422(client):
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
+    event_id = client.get(f"/games/{game_id}/events").json()[0]["id"]
+
+    response = client.post(f"/events/{event_id}/annotations", json={"rating": 6})
+    assert response.status_code == 422
 
 
 def test_websocket_receives_live_updates_then_stream_end(client, monkeypatch):

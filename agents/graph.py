@@ -80,7 +80,11 @@ def _decide_action(
     # mid-generation if hidden reasoning eats too much of a small budget
     # (confirmed live against Groq: a 200-token budget truncated the tool
     # call and failed to parse) — same cause as the note in _refresh_intent.
-    llm = build_llm(max_tokens=600, schema=FactionAction)
+    # 600 was enough for Groq but not for the OpenRouter fallback model
+    # (nvidia/nemotron-3-super-120b-a12b:free spent 135 tokens on hidden
+    # reasoning and still ran out mid-schema at 600 — confirmed live via
+    # openai.LengthFinishReasonError); 900 has margin for both.
+    llm = build_llm(max_tokens=900, schema=FactionAction)
     prompt = (
         f"You lead the faction '{faction['name']}' ({faction_id}) in a "
         f"strategy game. {describe(faction['role_preset'])}\n"

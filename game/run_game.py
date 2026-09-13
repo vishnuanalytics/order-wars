@@ -24,8 +24,7 @@ import argparse
 import logging
 import re
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -44,7 +43,7 @@ from db.models import (
     Scenario,
     ScenarioFaction,
 )
-from db.session import get_sessionmaker
+from db.session import get_sessionmaker, scoped_session
 from game.rules import territory_of
 from map_data.loader import get_province
 
@@ -94,23 +93,6 @@ def _validate_faction_configs(faction_configs: list[dict]) -> None:
                 f"in {province_id!r} — starting provinces must be unique"
             )
         seen[province_id] = cfg["faction_id"]
-
-
-@contextmanager
-def _scoped_session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
-    """Same commit/rollback shape as `db.session.session_scope()`, but
-    parameterized so tests (and, soon, `backend/`) can inject a session
-    factory instead of always hitting the real Neon database.
-    """
-    session = session_factory()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 def _slugify(name: str) -> str:
@@ -229,7 +211,7 @@ def create_game(
 
     session_factory = session_factory or get_sessionmaker()
 
-    with _scoped_session(session_factory) as session:
+    with scoped_session(session_factory) as session:
         if scenario_id is not None:
             faction_configs = load_faction_configs(session, scenario_id)
         elif faction_configs is None:
@@ -272,7 +254,7 @@ def play_game(
     except Exception:
         logger.exception("Game %s failed", game_id)
         try:
-            with _scoped_session(session_factory) as session:
+            with scoped_session(session_factory) as session:
                 game = session.get(Game, game_id)
                 if game is not None:
                     game.status = GameStatus.FAILED
@@ -324,7 +306,7 @@ def _play_game(
                 on_event(state)
             continue
 
-        with _scoped_session(session_factory) as session:
+        with scoped_session(session_factory) as session:
             session.add(
                 GameEvent(
                     game_id=game_id,
@@ -402,7 +384,7 @@ def _play_game(
         if winner_faction_id is not None:
             break
 
-    with _scoped_session(session_factory) as session:
+    with scoped_session(session_factory) as session:
         game = session.get(Game, game_id)
         game.status = GameStatus.COMPLETED
         game.current_turn = final_state["turn"]

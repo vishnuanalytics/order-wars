@@ -27,6 +27,7 @@ resort. See `.env.example` for the keys and model overrides.
 python -m agents.graph              # Phase 4 demo: N factions, no persistence
 python -m game.run_game             # Phase 5: full game loop, persists to Postgres (needs DATABASE_URL)
 uvicorn backend.main:app --reload   # Phase 5: HTTP/WebSocket API (needs DATABASE_URL)
+python -m eval.run_eval --game-id <id>  # Phase 6: score a completed game with DeepEval
 pytest tests/                        # mocked, no live API/DB calls
 ```
 
@@ -35,6 +36,13 @@ pytest tests/                        # mocked, no live API/DB calls
 doesn't persist anything, useful for a quick check without a database
 configured. With the backend running, `GET /docs` has the interactive API
 reference (FastAPI's auto-generated Swagger UI).
+
+`eval.run_eval` scores every faction-authored `GameEvent` in a completed game
+against two DeepEval metrics (a rule-based legality check and an LLM-judged
+role-alignment score via `GEval`), and persists the results as `EvalScore`
+rows. The same thing is reachable from the frontend's Review tab
+(`POST /games/{id}/evaluate`), which also lets a human add a 1-5 rating and
+note per event (`Annotation` rows).
 
 ### Frontend
 
@@ -46,7 +54,9 @@ npm run dev            # http://localhost:5173 — needs the backend running too
 ```
 
 Build a scenario (add factions, click the map to set each one's home
-province), save it, then start a game from it and watch it play live.
+province), save it, then start a game from it and watch it play live. The
+Review tab lets you pick a completed game, run the DeepEval scorer, and
+annotate individual turns.
 
 ## Phase status
 
@@ -56,7 +66,7 @@ province), save it, then start a game from it and watch it play live.
 - [x] Phase 3 — map/geo generation (`map_data/`)
 - [x] Phase 4 — connect agents to the map (`agents/`, `game/`)
 - [x] Phase 5 — game loop + visualization (`game/`, `backend/`, `frontend/`)
-- [ ] Phase 6 — eval + annotation (`eval/`)
+- [x] Phase 6 — eval + annotation (`eval/`)
 
 See `claude.md` for what each phase covers and the "Progress log" for what's
 landed so far.

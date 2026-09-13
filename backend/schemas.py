@@ -6,6 +6,7 @@ db/models.py doesn't silently change the API, and vice versa.
 """
 
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -118,10 +119,51 @@ class GameSummaryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class GameEventOut(BaseModel):
-    turn: int
-    faction_id: uuid.UUID
-    event_type: str
-    payload: dict
+class EvalScoreOut(BaseModel):
+    metric_name: str
+    score: float
+    success: bool
+    reason: str | None
 
     model_config = {"from_attributes": True}
+
+
+class AnnotationOut(BaseModel):
+    id: uuid.UUID
+    rating: int | None
+    note: str | None
+    created_by: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AnnotationCreate(BaseModel):
+    """A human reviewer's note on one GameEvent. All fields optional (but
+    not all empty — see the route) since a reviewer might rate without
+    writing anything, or vice versa.
+    """
+
+    rating: int | None = Field(default=None, ge=1, le=5)
+    note: str | None = None
+    created_by: str | None = None
+
+
+class GameEventOut(BaseModel):
+    id: uuid.UUID
+    turn: int
+    faction_id: uuid.UUID | None
+    event_type: str
+    payload: dict
+    eval_scores: list[EvalScoreOut] = []
+    annotations: list[AnnotationOut] = []
+
+    model_config = {"from_attributes": True}
+
+
+class EvalRunResultOut(BaseModel):
+    turn: int
+    faction_name: str
+    metric_name: str
+    score: float
+    success: bool | None
