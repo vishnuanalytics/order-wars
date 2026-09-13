@@ -1382,6 +1382,174 @@ silently dropped scope.
   preempted the rotation, and Carthage (true to its warmonger prompt)
   responded by declaring war instead of accepting.
 
+## Engagement, learnability, and live-play pass (post-rollout, post-hierarchy)
+
+Requested directly by the user, in two stages: first "make eval/annotation
+more learnable and the platform more engaging" (the build was functionally
+complete but the DeepEval-scoring/human-annotation loop — the actual point
+of Phase 6 — was opaque to a first-time user), then, separately, "make
+users engage for a bit of time" with three concrete directions picked from
+a menu: gamified annotation, live-play spectacle, and letting a viewer take
+over an agent mid-game and hand it back. Landed as ~10 commits, each
+independently buildable/testable, in roughly this order:
+
+- **`Resource Efficiency` metric** (`eval/metrics.py`): a second rule-based
+  (no LLM call) DeepEval metric alongside `Legal Action` — catches an
+  action that was *legal* but still wasted the turn (unaffordable
+  build/development, or targeting a province not owned), a gap
+  `_sanitize_action` doesn't cover since it only guards illegal targets,
+  not affordability/ownership. Deliberately kept the LLM-judged
+  `Role Alignment` as the only metric that costs an API call per event, so
+  scoring a game doesn't scale its LLM cost with how many dimensions get
+  measured (an explicit constraint given this project's known Groq/
+  OpenRouter free-tier and $0-Anthropic-credit situation, see Phase 6's
+  progress notes above).
+- **Review tab overhaul** (`frontend/src/reviewView.js`): a collapsible
+  metric glossary (plain-English explanation + free/LLM-call cost tag per
+  metric, sourced from one shared `METRIC_GLOSSARY` object in `utils.js`
+  so the tour below can reuse it), an aggregate dashboard (per-metric and
+  per-faction-×-metric average bars, computed client-side from already-
+  loaded events — no new endpoint), a "low scores only"/faction filter
+  re-rendering from the cached event list (no refetch), and low scores
+  showing their `reason` text inline instead of hover-only.
+- **Onboarding tour** (`frontend/src/tour.js`, new file): a short dismissible
+  walkthrough across every tab, explicitly calling out that Review is
+  where automatic scoring and human annotation combine — reachable again
+  via a header "?" button, `localStorage`-gated like everything else here
+  that remembers per-browser state (no login system — see Non-goals).
+  **Real bug caught live, not by inspection**: the overlay's own
+  `display: flex` beat the browser's default `[hidden] { display: none }`
+  rule at equal specificity (both `.tour-overlay` and `[hidden]` are
+  0,1,0), so it stayed visible and ate clicks even when `hidden` was set —
+  fixed by scoping the rule to `:not([hidden])`.
+- **Game-complete banner + power bars** (`gameView.js`): a banner naming
+  the winner with a direct link into the Review tab (preselecting the
+  game), and a per-faction power bar (`territory + units + resources/10`,
+  a client-side port of `game/rules.py`'s `faction_power`) for an
+  at-a-glance "who's ahead" read.
+- **Diplomatic status panel + cross-game Insights tab**: two new read-only
+  endpoints — `GET /games/{id}/diplomacy` (current non-neutral status per
+  faction pair, from `DiplomaticRelation`, latest `turn_changed` wins) and
+  `GET /insights/role-presets` (every DeepEval score across every
+  evaluated game, aggregated by `(role_preset, metric_name)` — Python-side
+  aggregation, matching this project's existing precedent for datasets
+  this small, not a real OLAP query). Insights is a genuinely new view,
+  distinct from Review's per-game breakdown: it answers "does the
+  Warmonger preset really play less legally than the Diplomat-Trader, on
+  average" across every game, not just one playthrough.
+- **Gamified annotation + live-play spectacle**: `annotationProgress.js`
+  tracks a per-browser (`localStorage`) running annotation count with
+  Roman-themed milestone badges (First Dispatch → Master Strategos) and a
+  celebratory toast; the game view gained a pulsing dot on the "running"
+  status pill, a large animated ticker banner for the most recent notable
+  event (rewards glancing over; the event log already rewarded reading
+  closely), and CSS transitions on province recoloring and the power bars
+  so a capture or a shifting power balance visibly happens instead of
+  snapping.
+- **Live-play control — a viewer can take over a faction mid-game, then
+  hand it back to the AI.** By far the largest piece: the game loop runs
+  autonomously on a background thread per game (`backend/game_hub.py`),
+  and the live WebSocket was one-way (server → client) before this. Two
+  behavior calls were confirmed with the user before building: fall back
+  to the AI after `HUMAN_ACTION_TIMEOUT_SECONDS` (45s) if a human holds
+  control but doesn't act (so an abandoned tab can't stall a spectated
+  game forever — control itself isn't released, just that one turn), and
+  a controlled faction can submit *any* action type, not just whichever
+  specialist the dispatcher would have picked that turn.
+  - `agents/graph.py`: a `threading.local()`-scoped `human_action_provider`
+    hook, set once per game by whatever thread is running that game's
+    turn loop (each game already gets its own dedicated background
+    thread via `GameHub.start`, so this needs no new parameter threaded
+    through every LangGraph node, and `agents/` stays fully decoupled
+    from `backend/`). `faction_turn` checks it before ever calling the
+    AI; the exact same `_sanitize_action`/`resolve_action` path runs
+    either way — a human can't submit anything the AI couldn't also have
+    (illegally) attempted.
+  - `game/run_game.py`: `play_game` takes an optional
+    `human_action_provider`, setting/clearing the hook around the turn
+    loop. `game/` still has zero `backend/` dependency — the concrete
+    provider (backed by `GameHub`) is `backend/main.py`'s to build and
+    inject; the CLI and tests never pass one.
+  - `backend/game_hub.py`: a small control-plane addition alongside the
+    existing broadcast queues — which factions are human-controlled
+    (no-auth: "controlled" means whoever last claimed it, like everything
+    else here), a place for a submitted action to land, and a
+    game-id → faction-slug map so a submitted action's own
+    `target_faction` (e.g. who to `declare_war` on) can be translated
+    from the DB id the frontend knows into the slug `agents/graph.py`
+    expects.
+  - `backend/main.py`: the live WebSocket now also *receives*
+    `take_control`/`release_control`/`submit_action` messages, as a
+    concurrent receive task alongside the existing broadcast-forwarding
+    one. **Real bug this surfaced, not just a test issue**:
+    `asyncio.to_thread`-wrapped blocking `queue.Queue.get()` can't
+    actually be interrupted by cancelling the awaiting Task — a
+    subscriber that never receives anything (e.g. it connected after the
+    game had already finished) would hang the connection's cleanup path
+    forever waiting on it. Fixed with a bounded poll (`_queue_get_or_none`,
+    0.5s) instead of a bare blocking `get()`.
+  - `frontend/src/gameView.js`: a "Play as this faction" toggle per
+    faction (live spectating only) and, while held, a full action form
+    sent over the socket. Submissions are queued, not turn-gated
+    client-side — no need to track "whose turn is it" precisely in the
+    browser. In-progress form input survives `refreshGameDetail`'s
+    per-live-event re-render via a snapshot/restore step.
+  - **Verified live end-to-end against the real Groq-backed dev server**
+    (not just mocked tests): a real 2-faction game, took control of
+    Carthage mid-game via the actual browser form, and confirmed via
+    direct DB query the resulting `GameEvent` was tagged
+    `specialist="human"` with the exact typed rationale.
+- **Six more, in one pass**: `GET /games/{id}/snapshots` (every turn's
+  `FactionStateSnapshot`, reusing `FactionStateOut` as-is, not just the
+  latest) powers a real **replay scrubber** (play/pause/speed/scrub,
+  recoloring the map turn-by-turn instead of only ever showing the final
+  board). The completion banner gained a **highlights reel** (the game's
+  notable moments, reusing `game/narrative.py`'s tagging) and a
+  **predict-the-winner** reveal (client-side guess vs. actual outcome).
+  Confirmed two *simultaneous* live browser sessions can each control a
+  different faction in the same game and correctly see each other's
+  control state via the server broadcast — a real multi-viewer "watch
+  party," not single-viewer control renamed — which is also why the old
+  "🎮 you" badge became "🎮 human-controlled": there's no auth, so a
+  viewer's browser genuinely cannot tell "you" from "someone else's tab
+  also watching." Review gained a **per-metric trend sparkline** (inline
+  SVG, no charting library — an average is one number, this is the shape
+  behind it) and a **CSV export** of the currently-filtered decisions,
+  scores, and annotations.
+- **Gap-fix pass** over the live-play-control and prediction work above,
+  from re-reading the code rather than a new ask: a "📍 Pick on map"
+  button for the action form's `target_province` field (it was a bare
+  text input requiring a human to already know a real province id like
+  `831e80fffffffff` — undiscoverable). Picking state lives on the
+  `GameView` instance, not a per-form closure, specifically because
+  `refreshGameDetail` rebuilds every `.action-form`'s DOM on every live
+  event (any faction's turn, not just the one being picked for) — a
+  closure-based version would silently point the map's click handler at a
+  detached, never-rendered-again form the moment another faction acted
+  mid-pick. **Real bug caught while building this, not by inspection**:
+  the new button first reused the class name `.pick-province-button`,
+  already claimed by `ScenarioEditor`'s own home-province picker — the
+  later CSS rule in source order was silently reskinning that unrelated,
+  pre-existing button. Renamed to `.pick-target-province-button` before
+  it shipped. Also: predict-the-winner was pure in-memory state, lost on
+  reload — now `sessionStorage`-backed per game id, which also fixed a
+  latent bug where `loadReplay` never touched `this.prediction` at all,
+  so revisiting a *different* finished game right after watching some
+  other game live could show a reveal banner for the wrong prediction
+  entirely. And CSV export only included an event's *first* annotation,
+  silently dropping any more (multiple reviewers, or a second note) — now
+  joins all of them.
+
+Every piece above shipped with real test coverage (backend: pytest,
+mocked/direct, no live LLM/Neon calls in the suite — 205 passing as of
+this pass) and, for anything touching the live game loop or the
+WebSocket, a live-verified pass against the real dev server (headless
+Chromium via a rebuilt `libnspr4`/`libnss3`/`libasound` workaround in this
+sandbox, same technique Phase 5's frontend verification used) — seeded
+demo data via direct ORM writes where no LLM call was needed, real
+free-tier Groq calls (cleaned up from Neon afterward) only where the
+turn loop itself had to actually run.
+
 ## Non-goals
 
 - No live Google Maps API calls in the core game loop (cost/quota, and historical
