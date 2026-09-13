@@ -16,6 +16,7 @@ export class GameView {
     this.gameListEl = document.getElementById("game-list");
     this.gameDetailEl = document.getElementById("game-detail");
     this.eventLogEl = document.getElementById("event-log");
+    this.tickerEl = document.getElementById("live-ticker");
 
     this.socket = null;
     this.currentGameId = null;
@@ -43,6 +44,7 @@ export class GameView {
   async watchGame(gameId) {
     this.currentGameId = gameId;
     this.eventLogEl.innerHTML = "";
+    this.tickerEl.hidden = true;
     this._closeSocket();
     await this.refreshGameDetail();
 
@@ -50,7 +52,8 @@ export class GameView {
     this.socket.addEventListener("message", async (event) => {
       const message = JSON.parse(event.data);
       if (message.type === "state") {
-        this._appendLogEntry(message.last_event);
+        const tag = this._appendLogEntry(message.last_event);
+        if (tag) this._showTicker(tag);
         await this.refreshGameDetail();
       } else if (message.type === "stream_end") {
         this._closeSocket();
@@ -69,6 +72,7 @@ export class GameView {
     this.currentGameId = gameId;
     this._closeSocket();
     this.eventLogEl.innerHTML = "";
+    this.tickerEl.hidden = true;
     await this.refreshGameDetail(); // populates factionNameById before the log needs it
     const events = await getGameEvents(gameId);
     for (const event of events) {
@@ -93,8 +97,12 @@ export class GameView {
     }
   }
 
+  /** Returns the notable/headline tag it used, so live callers can also
+   * drive the ticker (_showTicker) off the same classification without
+   * recomputing it.
+   */
   _appendLogEntry(event) {
-    if (!event) return; // the initial pre-game state carries no event
+    if (!event) return null; // the initial pre-game state carries no event
     const li = document.createElement("li");
     const actor = this.factionNameById[event.faction_id] || event.faction_id;
     const target = event.target_province || event.target_faction || "";
@@ -114,6 +122,23 @@ export class GameView {
       (event.resolution ? ` (${event.resolution})` : "") +
       (tag.notable && tag.headline ? ` ★ ${tag.headline}` : "");
     this.eventLogEl.prepend(li);
+    return { ...tag, actor, turn: event.turn };
+  }
+
+  /** Flashes the most recent notable moment as a large, animated banner —
+   * live spectating only (see watchGame): a scrolling event log rewards
+   * reading closely, this rewards glancing over. Re-triggers its entrance
+   * animation on every call, including repeats of the same text, via the
+   * same force-reflow pattern as reviewView.js's badge toast.
+   */
+  _showTicker(tag) {
+    if (!this.tickerEl || !tag.notable) return;
+    this.tickerEl.hidden = false;
+    this.tickerEl.textContent = `★ Turn ${tag.turn} — ${tag.actor}: ${tag.headline}`;
+    this.tickerEl.classList.remove("live-ticker-pulse");
+    // eslint-disable-next-line no-unused-expressions
+    this.tickerEl.offsetHeight;
+    this.tickerEl.classList.add("live-ticker-pulse");
   }
 
   async refreshGameDetail() {

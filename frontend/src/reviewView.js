@@ -1,5 +1,6 @@
 import { createAnnotation, evaluateGame, getGame, getGameEvents, listGames } from "./api.js";
 import { escapeHtml, METRIC_GLOSSARY } from "./utils.js";
+import { getAnnotationStats, recordAnnotation } from "./annotationProgress.js";
 
 export class ReviewView {
   constructor() {
@@ -12,6 +13,7 @@ export class ReviewView {
     this.lowOnlyCheckbox = document.getElementById("review-low-only");
     this.glossaryToggle = document.getElementById("metric-glossary-toggle");
     this.glossaryEl = document.getElementById("metric-glossary");
+    this.progressWidgetEl = document.getElementById("annotation-progress-widget");
     this.factionNameById = {};
     this.selectedGameId = null;
     this._events = []; // the full, unfiltered list for the current game — filters re-render from this, no refetch
@@ -37,6 +39,8 @@ export class ReviewView {
 
     this.gameSelect.addEventListener("change", () => this._selectGame(this.gameSelect.value));
     this.runButton.addEventListener("click", () => this._runEvaluation());
+
+    this._renderProgressWidget();
   }
 
   async refreshGameList() {
@@ -260,9 +264,56 @@ export class ReviewView {
     }
     try {
       await createAnnotation(eventId, { rating: rating ? Number(rating) : null, note: note || null });
+      const { newlyEarned } = recordAnnotation();
+      this._renderProgressWidget();
+      if (newlyEarned) this._showBadgeToast(newlyEarned);
       await this._loadEvents();
     } catch (err) {
       window.alert(`Could not save annotation: ${err.message}`);
     }
+  }
+
+  /** A small persistent stat pill — "how much reviewing have I done in
+   * this browser" — separate from the per-game annotation count in
+   * _renderSummary, which resets per selected game; this one is cumulative
+   * across every game the viewer has ever annotated here.
+   */
+  _renderProgressWidget() {
+    const { count, currentBadge, nextBadge } = getAnnotationStats();
+    if (count === 0) {
+      this.progressWidgetEl.innerHTML = "";
+      return;
+    }
+    const badgeText = currentBadge ? `🏅 ${escapeHtml(currentBadge.name)} · ` : "";
+    const nextText = nextBadge
+      ? `${nextBadge.threshold - count} more to "${escapeHtml(nextBadge.name)}"`
+      : "every badge earned";
+    this.progressWidgetEl.innerHTML =
+      `<span class="progress-count">${badgeText}${count} decision${count === 1 ? "" : "s"} annotated</span>` +
+      `<span class="progress-next">${nextText}</span>`;
+  }
+
+  _showBadgeToast(badge) {
+    const toast = document.createElement("div");
+    toast.className = "badge-toast";
+    toast.innerHTML = `
+      <div class="badge-toast-icon">🏅</div>
+      <div>
+        <strong>${escapeHtml(badge.name)}</strong>
+        <div class="badge-toast-description">${escapeHtml(badge.description)}</div>
+      </div>
+    `;
+    document.body.appendChild(toast);
+    // Force a reflow so the enter transition actually plays instead of
+    // starting from its own end state (same class of bug as the tour
+    // overlay's [hidden] fix — CSS transitions need the "before" state to
+    // have painted at least once before the class toggle that starts it).
+    // eslint-disable-next-line no-unused-expressions
+    toast.offsetHeight;
+    toast.classList.add("badge-toast-visible");
+    setTimeout(() => {
+      toast.classList.remove("badge-toast-visible");
+      setTimeout(() => toast.remove(), 400);
+    }, 3200);
   }
 }
