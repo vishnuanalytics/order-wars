@@ -397,6 +397,35 @@ def test_create_game_rejects_duplicate_home_provinces(sqlite_sessionmaker):
         assert session.query(Game).count() == 0
 
 
+def test_create_game_rejects_overlapping_starting_territory(sqlite_sessionmaker):
+    # Distinct capitals, but B's starting_territory reaches into A's capital.
+    configs = [
+        {"faction_id": "a", "name": "A", "role_preset": "custom", "home_province": ROME_HOME},
+        {
+            "faction_id": "b", "name": "B", "role_preset": "custom", "home_province": ROME_NEIGHBOR,
+            "starting_territory": [ROME_NEIGHBOR, ROME_HOME],
+        },
+    ]
+    with pytest.raises(ValueError, match="territory must not overlap"):
+        create_game(configs, max_turns=5, session_factory=sqlite_sessionmaker)
+
+
+def test_faction_starts_owning_its_full_starting_territory(sqlite_sessionmaker):
+    configs = [
+        {
+            "faction_id": "a", "name": "A", "role_preset": "custom", "home_province": ROME_HOME,
+            "starting_territory": [ROME_HOME, ROME_NEIGHBOR],
+        },
+        {"faction_id": "b", "name": "B", "role_preset": "custom", "home_province": "83386efffffffff"},
+    ]
+    game_id, faction_configs, db_faction_id = create_game(configs, max_turns=1, session_factory=sqlite_sessionmaker)
+    state = graph_module.initial_state_for(faction_configs, max_turns=1)
+
+    assert state["province_owner"][ROME_HOME] == "a"
+    assert state["province_owner"][ROME_NEIGHBOR] == "a"
+    assert state["capitals"]["a"] == ROME_HOME  # capital stays the single fixed anchor
+
+
 def test_create_game_rejects_unreal_province_id(sqlite_sessionmaker):
     configs = [
         {"faction_id": "a", "name": "A", "role_preset": "custom", "home_province": "not_a_real_id"},

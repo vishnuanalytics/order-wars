@@ -5,6 +5,7 @@ from agents.actions import FactionAction, MilitaryAction
 from agents.graph import (
     _dispatch_specialist,
     _get_human_action_provider,
+    _refresh_intent,
     _sanitize_action,
     build_graph,
     faction_turn,
@@ -101,6 +102,72 @@ def _force_specialist(monkeypatch, domain: str) -> None:
     monkeypatch.setattr(graph_module, "_dispatch_specialist", lambda state, faction_id: domain)
 
 
+def test_refresh_intent_never_calls_build_llm(monkeypatch):
+    def _explode(*a, **k):
+        raise AssertionError("_refresh_intent should never call build_llm")
+
+    monkeypatch.setattr(graph_module, "build_llm", _explode)
+    state = _state(
+        {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+    )
+    _refresh_intent(state, "rome")  # must not raise
+
+
+def test_refresh_intent_reacts_to_an_active_war_per_role_preset():
+    state = _state(
+        {
+            "rome": _faction("rome", "Rome", role_preset="warmonger"),
+            "carthage": _faction("carthage", "Carthage", role_preset="isolationist"),
+        },
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+    )
+    assert "Press the war" in _refresh_intent(state, "rome")
+    assert "Carthage" in _refresh_intent(state, "rome")
+    assert "Hold defensive ground" in _refresh_intent(state, "carthage")
+
+
+def test_refresh_intent_diplomat_trader_seeks_terms_during_war():
+    state = _state(
+        {
+            "rome": _faction("rome", "Rome", role_preset="diplomat_trader"),
+            "carthage": _faction("carthage", "Carthage", role_preset="custom"),
+        },
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+    )
+    assert "Seek terms to end the war" in _refresh_intent(state, "rome")
+
+
+def test_refresh_intent_expansionist_shifts_from_expand_to_consolidate_with_territory():
+    small = _state(
+        {"rome": _faction("rome", "Rome", role_preset="expansionist"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+    )
+    assert "Expand into unclaimed territory" in _refresh_intent(small, "rome")
+
+    big = _state(
+        {"rome": _faction("rome", "Rome", role_preset="expansionist"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", "a": "rome", "b": "rome", "c": "rome", CARTHAGE_HOME: "carthage"},
+    )
+    assert "Consolidate recent gains" in _refresh_intent(big, "rome")
+
+
+def test_refresh_intent_no_war_per_role_preset():
+    def _intent_for(role):
+        state = _state(
+            {"rome": _faction("rome", "Rome", role_preset=role), "carthage": _faction("carthage", "Carthage")},
+            {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+        )
+        return _refresh_intent(state, "rome")
+
+    assert "raiding or conquering" in _intent_for("warmonger")
+    assert "trade agreements" in _intent_for("diplomat_trader")
+    assert "Fortify home territory" in _intent_for("isolationist")
+    assert "own judgment" in _intent_for("custom")
+
+
 def test_faction_turn_refreshes_intent_and_applies_legal_action(monkeypatch):
     monkeypatch.setattr(graph_module, "build_llm", _fake_build_llm)
     _force_specialist(monkeypatch, "military")
@@ -114,7 +181,9 @@ def test_faction_turn_refreshes_intent_and_applies_legal_action(monkeypatch):
     assert update["active_faction_idx"] == 1
     assert update["turn"] == 0  # round not complete yet
     rome = update["factions"]["rome"]
-    assert rome["intent"] == "expand toward the coast"
+    # Rome is role_preset="custom" here (the _faction() default) and not at
+    # war — _refresh_intent's rule-based fallback for that combination.
+    assert rome["intent"] == "Act on your own judgment, adapting to the situation as it develops."
     assert rome["last_action"]["action_type"] == "move_army"
     assert update["province_owner"][ROME_NEIGHBOR] == "rome"  # legal move, captured
     assert "Turn 1 — Rome [military] (move_army)" in update["log"][0]
@@ -141,21 +210,18 @@ def test_faction_turn_sanitizes_illegal_move_to_hold(monkeypatch):
 
 def test_faction_turn_uses_a_human_submitted_action_when_provider_returns_one(monkeypatch):
     """A human action skips _dispatch_specialist and the specialist's own
-    LLM call entirely — the periodic leader-layer intent refresh is
-    unrelated to who executes this turn's action and still runs normally,
-    so build_llm is only made to explode for the schema-bound (specialist)
-    call, not the plain intent-refresh one.
+    LLM call entirely, and _refresh_intent (the periodic leader-layer
+    call) is rule-based now too (no LLM call at all, at any cadence) — so
+    this turn should reach build_llm zero times regardless of who acts.
     """
     def _dispatch_explode(*a, **k):
         raise AssertionError("_dispatch_specialist should not run when a human action is provided")
 
-    def _build_llm_no_specialist(max_tokens=64, schema=None):
-        if schema is not None:
-            raise AssertionError("a specialist LLM call should not run when a human action is provided")
-        return _FakeIntentLLM()
+    def _build_llm_explode(max_tokens=64, schema=None):
+        raise AssertionError("build_llm should not run at all when a human action is provided")
 
     monkeypatch.setattr(graph_module, "_dispatch_specialist", _dispatch_explode)
-    monkeypatch.setattr(graph_module, "build_llm", _build_llm_no_specialist)
+    monkeypatch.setattr(graph_module, "build_llm", _build_llm_explode)
     human_action = FactionAction(action_type="hold", rationale="a human decided this")
     set_human_action_provider(lambda faction_id: human_action)
     try:

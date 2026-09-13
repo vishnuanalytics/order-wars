@@ -158,20 +158,51 @@ def _trade_summary(state: GameState, faction_id: str) -> str:
     return "; ".join(active) if active else "none"
 
 
-def _refresh_intent(faction: FactionState, other_names: list[str]) -> str:
-    # Groq's gpt-oss models spend some of max_tokens on hidden reasoning
-    # before the visible answer (see agents/llm.py), so give more headroom
-    # than the one-sentence answer alone would need.
-    llm = build_llm(max_tokens=300)
-    prompt = (
-        f"You lead the faction '{faction['name']}' in a strategy game. "
-        f"{describe(faction['role_preset'])}\n"
-        f"Other factions in play: {', '.join(other_names) or 'none'}.\n"
-        "In one short sentence, state your strategic intent for the next "
-        "few turns."
-    )
-    response = llm.invoke(prompt)
-    return response.content if isinstance(response.content, str) else str(response.content)
+def _refresh_intent(state: GameState, faction_id: str) -> str:
+    """Rule-based, no LLM call — a real cost cut, not just a simplification:
+    this used to be one LLM call every INTENT_REFRESH_INTERVAL (3) turns,
+    roughly a quarter of a game's total agent LLM calls (the other three-
+    quarters being the per-turn action decision, which still needs a real
+    judgment call and stays an LLM call). Safe to cut because `intent` is
+    read-only flavor/context in the specialist prompts below ("Your
+    current strategic intent: ...") — never parsed, validated, or acted on
+    programmatically the way an actual action is, so a role-preset-driven
+    heuristic serves the same purpose. Takes `state`/`faction_id` (not
+    just the faction dict) specifically so it can react to real signals —
+    an active war changes what "expand into unclaimed territory" even
+    means — not just restate the role preset's static doctrine every time.
+    """
+    faction = state["factions"][faction_id]
+    role = faction["role_preset"]
+    at_war = [
+        fid for fid in _other_faction_ids(state, faction_id)
+        if diplomatic_status_between(state, faction_id, fid) == "war"
+    ]
+
+    if at_war:
+        enemies = ", ".join(state["factions"][fid]["name"] for fid in at_war)
+        if role == "warmonger":
+            return f"Press the war against {enemies} — press the advantage while it lasts."
+        if role == "isolationist":
+            return f"Hold defensive ground against {enemies} without chasing further conflict."
+        if role == "diplomat_trader":
+            return f"Seek terms to end the war with {enemies} as soon as they're favorable."
+        return f"Manage the war with {enemies} without losing sight of longer-term goals."
+
+    territory = len(territory_of(state, faction_id))
+    if role == "expansionist":
+        return (
+            "Expand into unclaimed territory and grow the economy."
+            if territory < 4
+            else "Consolidate recent gains, then keep expanding where it's safe."
+        )
+    if role == "warmonger":
+        return "Look for a weaker neighbor worth raiding or conquering."
+    if role == "diplomat_trader":
+        return "Pursue trade agreements and alliances with nearby factions."
+    if role == "isolationist":
+        return "Fortify home territory and avoid entanglements with neighbors."
+    return "Act on your own judgment, adapting to the situation as it develops."
 
 
 def _dispatch_specialist(state: GameState, faction_id: str) -> str:
@@ -415,11 +446,10 @@ def faction_turn(state: GameState) -> dict:
     idx = state["active_faction_idx"]
     faction_id = state["turn_order"][idx]
     faction: FactionState = dict(state["factions"][faction_id])
-    other_names = [state["factions"][fid]["name"] for fid in _other_faction_ids(state, faction_id)]
     round_number = state["turn"] + 1
 
     if faction["intent"] is None or (round_number - 1) % INTENT_REFRESH_INTERVAL == 0:
-        faction["intent"] = _refresh_intent(faction, other_names)
+        faction["intent"] = _refresh_intent(state, faction_id)
     state = {**state, "factions": {**state["factions"], faction_id: faction}}
 
     move_targets = _legal_move_targets(state, faction_id)
@@ -512,11 +542,15 @@ def initial_state_for(
     faction_configs: list[dict], max_turns: int, rebellion_seed: int | None = None
 ) -> GameState:
     """Build the starting `GameState` for a game. Each entry in
-    `faction_configs` is a dict with `faction_id`, `name`, `role_preset`, and
-    `home_province` (a real province id from `map_data/provinces.geojson` —
-    the faction's sole starting territory, and permanently its `capitals`
-    entry — see `game.rules`'s rebellion docs for why a capital is a fixed
-    geographic anchor, not wherever a faction currently holds). Optional
+    `faction_configs` is a dict with `faction_id`, `name`, `role_preset`,
+    `home_province` (a real province id — permanently the faction's
+    `capitals` entry, a fixed geographic anchor regardless of what it
+    later owns; see `game.rules`'s rebellion docs for why), and optional
+    `starting_territory` (a list of real province ids the faction begins
+    owning — `home_province` itself is always included even if the caller
+    left it out of the list). Factions with only `home_province` and no
+    `starting_territory` still start owning just that one province,
+    unchanged from before territory support existed. Optional
     `resources`/`units` override `STARTING_RESOURCES`/`STARTING_UNITS` per
     faction — this is what makes a scenario's customized starting
     resources/units (see `db.models.ScenarioFaction`) actually affect the
@@ -544,7 +578,11 @@ def initial_state_for(
         }
         for cfg in faction_configs
     }
-    province_owner = {cfg["home_province"]: cfg["faction_id"] for cfg in faction_configs}
+    province_owner: dict[str, str] = {}
+    for cfg in faction_configs:
+        territory = set(cfg.get("starting_territory") or ()) | {cfg["home_province"]}
+        for province_id in territory:
+            province_owner[province_id] = cfg["faction_id"]
     capitals = {cfg["faction_id"]: cfg["home_province"] for cfg in faction_configs}
 
     return {

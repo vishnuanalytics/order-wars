@@ -37,6 +37,17 @@
                 Max turns
                 <input type="number" id="scenario-max-turns" min="1" max="200" value="10" required />
               </label>
+              <label>
+                Starting territory size
+                <input type="number" id="scenario-territory-size" min="1" max="6" value="3" required />
+              </label>
+              <p class="hint">
+                Picking a capital auto-claims this many adjacent provinces too —
+                bigger starting footprints mean factions are more likely to
+                border each other early. Only applies to capitals picked after
+                changing this; use "Adjust territory" on a faction to hand-edit
+                afterward.
+              </p>
 
               <div id="faction-list"></div>
               <button type="button" id="add-faction-button">+ Add faction</button>

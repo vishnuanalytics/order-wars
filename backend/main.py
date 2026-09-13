@@ -164,6 +164,7 @@ def _as_faction_configs(factions: list[AdHocFactionIn]) -> list[dict]:
             "name": f.name,
             "role_preset": f.role_preset,
             "home_province": f.home_province,
+            "starting_territory": f.starting_territory,
             "resources": f.resources,
             "units": f.units,
         }

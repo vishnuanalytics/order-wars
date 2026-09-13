@@ -81,25 +81,29 @@ def check_winner(state: GameState) -> str | None:
 
 def _validate_faction_configs(faction_configs: list[dict]) -> None:
     """Catch two ways a game silently breaks instead of erroring: a
-    `home_province` that isn't a real province id, or two factions starting
-    in the same one (whichever faction "loses" the collision starts with
-    zero territory — permanently stuck, since it has no owned province to
-    ever compute a legal `move_army` target from).
+    province id (capital or anywhere in starting_territory) that isn't
+    real, or two factions starting with the same one. A collision inside
+    starting_territory is just as broken as one on home_province used to
+    be — agents.graph.initial_state_for builds province_owner by iterating
+    every faction's territory in order, so an unvalidated collision would
+    silently hand the province to whichever faction happens to come later
+    in the list, not raise.
     """
     seen: dict[str, str] = {}
     for cfg in faction_configs:
-        province_id = cfg["home_province"]
-        if get_province(province_id) is None:
-            raise ValueError(
-                f"Faction {cfg['faction_id']!r} has home_province {province_id!r}, "
-                "which isn't a real province id"
-            )
-        if province_id in seen:
-            raise ValueError(
-                f"Factions {seen[province_id]!r} and {cfg['faction_id']!r} both start "
-                f"in {province_id!r} — starting provinces must be unique"
-            )
-        seen[province_id] = cfg["faction_id"]
+        territory = set(cfg.get("starting_territory") or ()) | {cfg["home_province"]}
+        for province_id in territory:
+            if get_province(province_id) is None:
+                raise ValueError(
+                    f"Faction {cfg['faction_id']!r} has {province_id!r} in its starting "
+                    "territory, which isn't a real province id"
+                )
+            if province_id in seen:
+                raise ValueError(
+                    f"Factions {seen[province_id]!r} and {cfg['faction_id']!r} both start "
+                    f"in {province_id!r} — starting territory must not overlap"
+                )
+            seen[province_id] = cfg["faction_id"]
 
 
 def _slugify(name: str) -> str:
@@ -114,9 +118,12 @@ def load_faction_configs(session: Session, scenario_id: uuid.UUID) -> list[dict]
     dict keys) is derived from the faction's name, since ScenarioFaction has
     no such field of its own — only a DB UUID. Deduped with a numeric suffix
     if two factions in the scenario would otherwise slugify to the same id.
-    `home_province` is `starting_territory[0]` — this project doesn't yet
-    support a multi-province starting position (see agents/actions.py: one
-    pooled army, no per-province garrisons).
+    `home_province` (the capital, a fixed geographic anchor — see
+    agents.graph.initial_state_for) is `starting_territory[0]`; the rest of
+    `starting_territory` is carried through too, so a scenario with a
+    multi-province starting footprint (built in the scenario editor's
+    "Adjust territory") actually starts that way, not shrunk back to just
+    the capital.
     """
     scenario = session.get(Scenario, scenario_id)
     if scenario is None:
@@ -141,6 +148,7 @@ def load_faction_configs(session: Session, scenario_id: uuid.UUID) -> list[dict]
                 "name": sf.faction_name,
                 "role_preset": sf.role_preset.value,
                 "home_province": sf.starting_territory[0],
+                "starting_territory": list(sf.starting_territory),
                 "resources": dict(sf.starting_resources) or None,
                 "units": dict(sf.starting_units) or None,
             }
@@ -168,7 +176,7 @@ def _create_game_records(
                     role_preset=RolePreset(cfg["role_preset"]),
                     starting_resources=dict(cfg.get("resources") or {"gold": 20}),
                     starting_units=dict(cfg.get("units") or {"legion": 2}),
-                    starting_territory=[cfg["home_province"]],
+                    starting_territory=cfg.get("starting_territory") or [cfg["home_province"]],
                 )
             )
         session.add(scenario)

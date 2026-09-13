@@ -59,6 +59,11 @@ class AdHocFactionIn(BaseModel):
     name: str
     role_preset: str = "custom"
     home_province: str
+    # Optional: the rest of the starting territory beyond the capital
+    # (home_province is always included whether or not it's repeated here)
+    # — omitted entirely, an ad-hoc faction still starts owning just its
+    # one home_province, unchanged from before territory support existed.
+    starting_territory: list[str] | None = None
     resources: dict[str, int] | None = None
     units: dict[str, int] | None = None
 

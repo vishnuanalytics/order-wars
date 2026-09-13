@@ -63,6 +63,7 @@ async function main() {
 
   new ScenarioEditor({
     mapView,
+    provinces: provinces.features,
     onSaved: async (scenario) => {
       await refreshScenarioList();
       window.alert(`Scenario "${scenario.name}" saved.`);

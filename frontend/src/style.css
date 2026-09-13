@@ -315,6 +315,22 @@ form input[type="number"] {
   background: #e6f2ff;
   border-color: var(--accent);
 }
+.adjust-territory-button {
+  flex: 1;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.adjust-territory-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.adjust-territory-button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
 .remove-faction-button {
   color: #a00;
   cursor: pointer;
