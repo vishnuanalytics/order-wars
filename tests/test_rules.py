@@ -5,19 +5,21 @@ mocking — real province ids from the committed map, real adjacency.
 from agents.state import FactionState, GameState
 from game.rules import diplomatic_status_between, pair_key, resolve_action, territory_of
 
-HOME = "831e80fffffffff"  # Italy 20
+HOME = "831e80fffffffff"  # Italy 20, terrain=plains -> income yields grain
 NEIGHBOR = "831e81fffffffff"  # Italy 19, adjacent to HOME
 FAR_AWAY = "83386efffffffff"  # Tunisia 2, not adjacent to HOME
 
 
-def _faction(faction_id: str, name: str, gold: int = 20, legions: int = 2) -> FactionState:
+def _faction(
+    faction_id: str, name: str, gold: int = 20, iron: int = 20, legions: int = 2
+) -> FactionState:
     return {
         "faction_id": faction_id,
         "name": name,
         "role_preset": "custom",
         "intent": None,
         "last_action": None,
-        "resources": {"gold": gold},
+        "resources": {"gold": gold, "iron": iron},
         "units": {"legion": legions},
     }
 
@@ -50,7 +52,21 @@ def _action(action_type, **kwargs):
 def test_income_applied_every_turn_regardless_of_action():
     state = _state()
     result = resolve_action(state, "rome", _action("hold"))
-    assert result["factions"]["rome"]["resources"]["gold"] == 21  # 20 + 1/province
+    # HOME (Italy 20) is a "plains" province -> income yields grain, not
+    # gold; gold/iron are untouched since Rome owns no coastal/hills province.
+    assert result["factions"]["rome"]["resources"]["grain"] == 1  # 0 + 1/province
+    assert result["factions"]["rome"]["resources"]["gold"] == 20  # unchanged
+
+
+def test_income_yields_resource_matching_each_owned_provinces_terrain():
+    coastal = NEIGHBOR  # Italy 19, terrain=coastal -> gold
+    hills = "831eebfffffffff"  # Bulgaria 6, terrain=hills -> iron
+    state = _state(province_owner={HOME: "rome", coastal: "rome", hills: "rome"})
+    result = resolve_action(state, "rome", _action("hold"))
+    resources = result["factions"]["rome"]["resources"]
+    assert resources["grain"] == 1  # HOME, plains
+    assert resources["gold"] == 21  # 20 starting + 1 from the coastal province
+    assert resources["iron"] == 21  # 20 starting + 1 from the hills province
 
 
 def test_move_army_into_unclaimed_province_captures_it():
@@ -105,12 +121,14 @@ def test_move_army_into_enemy_territory_at_war_weaker_attacker_loses():
 def test_build_unit_spends_gold_and_adds_unit():
     state = _state()
     result = resolve_action(state, "rome", _action("build_unit"))
-    # 20 starting + 1 income - 15 cost = 6
-    assert result["factions"]["rome"]["resources"]["gold"] == 6
+    # A legion costs 10 gold + 5 iron (UNIT_COSTS); HOME's income yields
+    # grain (plains terrain), so gold/iron only reflect the build cost.
+    assert result["factions"]["rome"]["resources"]["gold"] == 10  # 20 - 10
+    assert result["factions"]["rome"]["resources"]["iron"] == 15  # 20 - 5
     assert result["factions"]["rome"]["units"]["legion"] == 3
 
 
-def test_build_unit_is_a_no_op_when_short_on_gold():
+def test_build_unit_is_a_no_op_when_short_on_a_required_resource():
     state = _state(factions={"rome": _faction("rome", "Rome", gold=0), "carthage": _faction("carthage", "Carthage")})
     result = resolve_action(state, "rome", _action("build_unit"))
     assert result["factions"]["rome"]["units"]["legion"] == 2  # unchanged

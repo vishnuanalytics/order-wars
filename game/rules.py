@@ -19,9 +19,27 @@ import math
 
 from agents.actions import FactionAction
 from agents.state import FactionState, GameState
+from map_data.loader import get_province
 
+# Each owned province yields 1 unit/turn of the resource tied to its
+# terrain (see map_data.generate_map's Stage 1 terrain classification) —
+# coastal provinces trade for gold, plains grow grain, hills mine iron.
+# An unrecognized/missing terrain falls back to gold, matching the
+# project's pre-terrain behavior.
+TERRAIN_RESOURCE: dict[str, str] = {
+    "coastal": "gold",
+    "plains": "grain",
+    "hills": "iron",
+}
 INCOME_PER_PROVINCE = 1
-BUILD_UNIT_COST = 15
+
+# Per-unit-type build costs, keyed by resource. A dict-of-dicts (not a flat
+# int) on purpose: unit composition (more unit types, each with their own
+# cost) is a later stage — this shape lets that stage add entries here
+# without changing the build_unit resolution logic below.
+UNIT_COSTS: dict[str, dict[str, int]] = {
+    "legion": {"gold": 10, "iron": 5},
+}
 BUILD_UNIT_TYPE = "legion"
 COMBAT_LOSER_ATTRITION = 0.5  # fraction of units the loser sheds
 COMBAT_WINNER_ATTRITION = 0.1  # fraction of units the winner still sheds
@@ -44,11 +62,17 @@ def _total_units(units: dict[str, int]) -> int:
     return sum(units.values())
 
 
-def _apply_income(faction: FactionState, owned_count: int) -> None:
+def _apply_income(faction: FactionState, owned: list[str]) -> None:
+    """Applied unconditionally every turn regardless of the faction's chosen
+    action (same as before terrain existed) — each owned province adds
+    INCOME_PER_PROVINCE of whatever resource its terrain yields."""
     faction["resources"] = dict(faction["resources"])
-    faction["resources"]["gold"] = faction["resources"].get("gold", 0) + (
-        INCOME_PER_PROVINCE * owned_count
-    )
+    for province_id in owned:
+        province = get_province(province_id)
+        resource = TERRAIN_RESOURCE.get(province.terrain, "gold") if province else "gold"
+        faction["resources"][resource] = (
+            faction["resources"].get(resource, 0) + INCOME_PER_PROVINCE
+        )
 
 
 def _attrit(units: dict[str, int], fraction: float) -> dict[str, int]:
@@ -80,7 +104,7 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
     faction["units"] = dict(faction["units"])
 
     owned = territory_of(state, faction_id)
-    _apply_income(faction, len(owned))
+    _apply_income(faction, owned)
 
     province_owner = dict(state["province_owner"])
     diplomatic_status = dict(state["diplomatic_status"])
@@ -91,12 +115,16 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         resolution = "held position"
 
     elif action.action_type == "build_unit":
-        if faction["resources"].get("gold", 0) >= BUILD_UNIT_COST:
-            faction["resources"]["gold"] -= BUILD_UNIT_COST
+        cost = UNIT_COSTS[BUILD_UNIT_TYPE]
+        resources = faction["resources"]
+        if all(resources.get(res, 0) >= amount for res, amount in cost.items()):
+            for res, amount in cost.items():
+                resources[res] -= amount
             faction["units"][BUILD_UNIT_TYPE] = faction["units"].get(BUILD_UNIT_TYPE, 0) + 1
             resolution = f"built 1 {BUILD_UNIT_TYPE}"
         else:
-            resolution = f"tried to build a {BUILD_UNIT_TYPE} but lacked {BUILD_UNIT_COST} gold"
+            cost_str = " and ".join(f"{amount} {res}" for res, amount in cost.items())
+            resolution = f"tried to build a {BUILD_UNIT_TYPE} but lacked {cost_str}"
 
     elif action.action_type == "declare_war":
         target = action.target_faction

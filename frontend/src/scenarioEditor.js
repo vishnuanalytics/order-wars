@@ -31,6 +31,8 @@ export class ScenarioEditor {
       homeProvince: null,
       homeProvinceName: null,
       gold: 20,
+      grain: 20,
+      iron: 10,
       legions: 2,
     });
     this._render();
@@ -97,12 +99,18 @@ export class ScenarioEditor {
         </div>
         <div class="faction-row-line">
           <span class="faction-stat">Gold<input type="number" class="faction-gold" value="${faction.gold}" min="0" aria-label="Starting gold" /></span>
+          <span class="faction-stat">Grain<input type="number" class="faction-grain" value="${faction.grain}" min="0" aria-label="Starting grain" /></span>
+        </div>
+        <div class="faction-row-line">
+          <span class="faction-stat">Iron<input type="number" class="faction-iron" value="${faction.iron}" min="0" aria-label="Starting iron" /></span>
           <span class="faction-stat">Legions<input type="number" class="faction-legions" value="${faction.legions}" min="0" aria-label="Starting legions" /></span>
         </div>
       `;
       row.querySelector(".faction-name").addEventListener("input", (e) => (faction.name = e.target.value));
       row.querySelector(".faction-role").addEventListener("change", (e) => (faction.rolePreset = e.target.value));
       row.querySelector(".faction-gold").addEventListener("input", (e) => (faction.gold = Number(e.target.value)));
+      row.querySelector(".faction-grain").addEventListener("input", (e) => (faction.grain = Number(e.target.value)));
+      row.querySelector(".faction-iron").addEventListener("input", (e) => (faction.iron = Number(e.target.value)));
       row
         .querySelector(".faction-legions")
         .addEventListener("input", (e) => (faction.legions = Number(e.target.value)));
@@ -129,7 +137,7 @@ export class ScenarioEditor {
       factions: this.factions.map((f) => ({
         faction_name: f.name,
         role_preset: f.rolePreset,
-        starting_resources: { gold: f.gold },
+        starting_resources: { gold: f.gold, grain: f.grain, iron: f.iron },
         starting_units: { legion: f.legions },
         starting_territory: [f.homeProvince],
       })),

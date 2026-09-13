@@ -149,7 +149,14 @@ form input[type="number"] {
   white-space: nowrap;
 }
 .faction-stat { display: flex; align-items: center; gap: 0.2rem; font-size: 0.75rem; color: var(--text-muted); }
-.faction-stat input { width: 3.2rem; flex-shrink: 0; }
+/* `.faction-row .faction-stat input`, not just `.faction-stat input`: the
+   generic `form input[type="number"] { width: 100% }` rule above has higher
+   specificity (0,1,2 vs 0,1,1) and was silently winning — every stat input
+   was stretching to its flex share instead of staying compact. Not visible
+   with 2 narrow stats per row, but adding a 3rd (Grain) made every input
+   overflow the sidebar (caught in a real screenshot, not by inspecting the
+   CSS) and traced back to this pre-existing specificity conflict. */
+.faction-row .faction-stat input { width: 3.2rem; flex-shrink: 0; }
 .pick-province-button.picked {
   background: #e6f2ff;
   border-color: var(--accent);
@@ -217,9 +224,16 @@ form input[type="number"] {
 }
 .faction-summary li {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
   margin-bottom: 0.3rem;
+}
+.faction-resources {
+  flex-basis: 100%;
+  margin-left: 1.2rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 .swatch {
   display: inline-block;

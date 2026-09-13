@@ -101,7 +101,9 @@ export class GameView {
     for (const faction of game.factions) this.factionNameById[faction.id] = faction.faction_name;
 
     const ownerByProvinceId = {};
+    const stateByFactionId = {};
     for (const factionState of game.faction_states) {
+      stateByFactionId[factionState.faction_id] = factionState;
       for (const provinceId of factionState.territory) {
         ownerByProvinceId[provinceId] = factionState.faction_name;
       }
@@ -117,9 +119,18 @@ export class GameView {
               ? "alive"
               : `eliminated (turn ${faction.eliminated_at_turn})`;
             const isWinner = faction.id === game.winner_faction_id;
+            const state = stateByFactionId[faction.id];
+            const resources = state
+              ? Object.entries(state.resources)
+                  .map(([resource, amount]) => `${amount} ${resource}`)
+                  .join(", ")
+              : "";
+            const units = state ? `${state.unit_count} units` : "";
             return `<li><span class="swatch" style="background:${swatch}"></span>
               ${escapeHtml(faction.faction_name)} (${escapeHtml(faction.role_preset)}) — ${status}
-              ${isWinner ? " 🏆" : ""}</li>`;
+              ${isWinner ? " 🏆" : ""}
+              ${resources ? `<div class="faction-resources">${escapeHtml(resources)} — ${escapeHtml(units)}</div>` : ""}
+              </li>`;
           })
           .join("")}
       </ul>

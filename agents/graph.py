@@ -22,7 +22,7 @@ from agents.llm import build_llm
 from agents.roles import describe
 from agents.state import FactionState, GameState
 from game.rules import diplomatic_status_between, resolve_action, territory_of
-from map_data.loader import name_of, neighbors_of, sea_neighbors_of
+from map_data.loader import get_province, name_of, neighbors_of, sea_neighbors_of
 
 INTENT_REFRESH_INTERVAL = 3
 
@@ -79,7 +79,9 @@ def _decide_action(
 ) -> FactionAction:
     faction = state["factions"][faction_id]
     owned = territory_of(state, faction_id)
-    move_options = ", ".join(f"{pid} ({name_of(pid)})" for pid in move_targets) or "none"
+    move_options = ", ".join(
+        f"{pid} ({name_of(pid)}, {get_province(pid).terrain})" for pid in move_targets
+    ) or "none"
 
     # Structured output goes out as a tool call, whose JSON args get cut off
     # mid-generation if hidden reasoning eats too much of a small budget
@@ -97,7 +99,10 @@ def _decide_action(
         f"Your territory ({len(owned)} provinces): "
         f"{', '.join(name_of(p) for p in owned) or 'none'}\n"
         f"Your resources: {faction['resources']}. Your units: {faction['units']}.\n"
-        f"Provinces you may move_army into this turn (own or adjacent): {move_options}\n"
+        "Each province you hold yields a resource every turn based on its "
+        "terrain: coastal -> gold, plains -> grain, hills -> iron.\n"
+        f"Provinces you may move_army into this turn (own or adjacent, with "
+        f"terrain): {move_options}\n"
         f"Other factions and your relations with them: {_diplomacy_summary(state, faction_id)}\n"
         "Choose this turn's action. For move_army, target_province must be "
         "one of the listed province ids. For negotiate/declare_war, "
@@ -204,7 +209,7 @@ def build_graph():
     return builder.compile()
 
 
-STARTING_RESOURCES = {"gold": 20}
+STARTING_RESOURCES = {"gold": 20, "grain": 20, "iron": 10}
 STARTING_UNITS = {"legion": 2}
 
 

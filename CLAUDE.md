@@ -781,10 +781,63 @@ The order, and why:
   this stage (mocked graph/rules tests already cover `_legal_move_targets`'
   consumers).
 
-Stages 2–11 will each get their own short validation pass against the real
-code before implementation (the same way stage 1's terrain thresholds and
-naval distance cutoff needed real data to calibrate correctly, not just
-up-front assumptions), landing as their own commits in this same order.
+### Stage 2 — multi-resource economy (done)
+
+Confirmed no DB/schema migration was needed: `FactionState.resources`/
+`.units`, `ScenarioFaction.starting_resources`/`.starting_units` (JSONB),
+`FactionStateSnapshot.resources` (JSONB), and the backend's Pydantic
+schemas were already untyped `dict[str, int]` at every layer — this stage
+is purely new keys + rules logic + frontend fields, exactly as the roadmap
+predicted.
+
+- `game/rules.py`: `TERRAIN_RESOURCE = {"coastal": "gold", "plains":
+  "grain", "hills": "iron"}` — `_apply_income` now looks up each owned
+  province's terrain (from Stage 1) and credits `INCOME_PER_PROVINCE` (1)
+  of that terrain's resource, instead of a flat gold-per-province. Applied
+  unconditionally every turn regardless of chosen action, same as before.
+- `BUILD_UNIT_COST` (a bare int) replaced with `UNIT_COSTS: dict[str,
+  dict[str, int]]` (currently `{"legion": {"gold": 10, "iron": 5}}`) — a
+  dict-of-dicts on purpose so Stage 3 (more unit types) can add entries
+  here without touching the build-resolution logic itself, which already
+  checks/deducts an arbitrary set of resources.
+- `agents/graph.py`: `STARTING_RESOURCES = {"gold": 20, "grain": 20,
+  "iron": 10}` (was gold-only); the executor prompt now lists each legal
+  move target's terrain and a one-line explanation of which terrain yields
+  which resource, so the LLM can reason about *why* a province is worth
+  taking, not just that it's legal.
+- `backend/schemas.py`'s `ScenarioFactionIn.starting_resources` default
+  updated to match, so API-created scenarios without explicit resources
+  also start with a real 3-resource economy.
+- `frontend/src/scenarioEditor.js`: added Grain/Iron starting-resource
+  inputs alongside Gold. `frontend/src/gameView.js`'s faction summary now
+  shows each faction's live resources/unit count (previously fetched from
+  the API but never displayed) — closes the gap from the very first ask in
+  this project ("test on the UI by adding units, resources... seeing
+  outcomes").
+- **Two real bugs caught by live screenshot verification, not
+  inspection**: (1) three resource stats per row overflowed the sidebar —
+  fixed by reverting to the already-proven 2-stats-per-row layout from
+  Phase 5. (2) that didn't fully fix it — measuring the actual rendered
+  widths found `.faction-stat input`'s `width: 3.2rem` had *never* been
+  applying, beaten by the generic `form input[type="number"] { width:
+  100% }` rule's higher CSS specificity (0,1,2 vs 0,1,1). This was a
+  latent bug predating this stage (2 wide-open inputs happened to fit
+  well enough before to go unnoticed); fixed by re-scoping the selector to
+  `.faction-row .faction-stat input` (0,2,1), which now correctly wins.
+- Verified without spending any LLM quota: `tests/test_rules.py` gained a
+  direct terrain-income test (one faction owning a plains + coastal +
+  hills province nets grain + gold + iron in one turn) and an updated
+  build-cost test; both pass fully mocked. The frontend resources display
+  was verified live by inserting a `Game`/`GameFaction`/
+  `FactionStateSnapshot` row directly via the ORM (no LLM calls at all)
+  and loading it in a real browser — confirmed the sidebar renders "21
+  gold, 15 iron, 5 grain — 3 units" correctly, then cleaned up the test
+  row from Neon. 99/99 tests pass.
+
+Stages 3–11 will each get their own short validation pass against the real
+code before implementation (the same way stages 1 and 2 needed real data/
+code to calibrate correctly, not just up-front assumptions), landing as
+their own commits in this same order.
 
 ## Non-goals
 

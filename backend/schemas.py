@@ -16,7 +16,9 @@ from game.run_game import MAX_TURNS_LIMIT
 class ScenarioFactionIn(BaseModel):
     faction_name: str
     role_preset: str = "custom"
-    starting_resources: dict[str, int] = Field(default_factory=lambda: {"gold": 20})
+    starting_resources: dict[str, int] = Field(
+        default_factory=lambda: {"gold": 20, "grain": 20, "iron": 10}
+    )
     starting_units: dict[str, int] = Field(default_factory=lambda: {"legion": 2})
     starting_territory: list[str] = Field(
         min_length=1, description="Real province ids from map_data/provinces.geojson"
