@@ -145,6 +145,22 @@ def test_get_provinces_returns_real_geojson(client):
     assert len(body["features"]) > 0
 
 
+def test_get_rivers_returns_real_geojson(client):
+    response = client.get("/map/rivers")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "FeatureCollection"
+    assert len(body["features"]) > 0
+
+
+def test_get_cities_returns_real_geojson(client):
+    response = client.get("/map/cities")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "FeatureCollection"
+    assert len(body["features"]) > 0
+
+
 def test_create_and_fetch_scenario(client):
     payload = {
         "name": "Test Scenario",

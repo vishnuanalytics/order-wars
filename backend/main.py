@@ -57,7 +57,7 @@ from db.session import get_sessionmaker
 from eval.run_eval import run_eval
 from game.narrative import classify_event
 from game.run_game import ScenarioNotFoundError, create_game, play_game
-from map_data.loader import PROVINCES_PATH
+from map_data.loader import CITIES_PATH, PROVINCES_PATH, RIVERS_PATH
 
 app = FastAPI(title="Order Wars API")
 
@@ -117,6 +117,16 @@ def health() -> dict:
 @app.get("/map/provinces")
 def get_provinces() -> FileResponse:
     return FileResponse(PROVINCES_PATH, media_type="application/geo+json")
+
+
+@app.get("/map/rivers")
+def get_rivers() -> FileResponse:
+    return FileResponse(RIVERS_PATH, media_type="application/geo+json")
+
+
+@app.get("/map/cities")
+def get_cities() -> FileResponse:
+    return FileResponse(CITIES_PATH, media_type="application/geo+json")
 
 
 @app.post("/scenarios", response_model=ScenarioOut, status_code=201)

@@ -58,6 +58,16 @@ from shapely.ops import substring, unary_union
 MAP_DATA_DIR = Path(__file__).parent
 RAW_DIR = MAP_DATA_DIR / "raw"
 OUTPUT_PATH = MAP_DATA_DIR / "provinces.geojson"
+# Separate files, not folded into provinces.geojson: rivers (LineString) and
+# cities (Point) are a different geometry type from the province hexes
+# (Polygon) — a mixed-geometry FeatureCollection is valid GeoJSON but an
+# unnecessary complication for every consumer (the loader, the frontend)
+# when "three flat files, one per geometry type" is just as simple to ship
+# and load. Purely visual/flavor overlays — see generate_map.py's module
+# docstring and CLAUDE.md's Progress Log for why no gameplay mechanics
+# (income, movement, defense) key off either of these yet.
+RIVERS_OUTPUT_PATH = MAP_DATA_DIR / "rivers.geojson"
+CITIES_OUTPUT_PATH = MAP_DATA_DIR / "cities.geojson"
 
 NATURAL_EARTH_LAND_URL = "https://naturalearth.s3.amazonaws.com/50m_physical/ne_50m_land.zip"
 NATURAL_EARTH_ADMIN0_URL = (
@@ -108,6 +118,42 @@ def _load_countries(bbox) -> gpd.GeoDataFrame:
     from shapely.geometry import box
 
     return countries.clip(box(*bbox))[["NAME", "geometry"]].rename(columns={"NAME": "country"})
+
+
+NATURAL_EARTH_RIVERS_URL = (
+    "https://naturalearth.s3.amazonaws.com/50m_physical/ne_50m_rivers_lake_centerlines.zip"
+)
+NATURAL_EARTH_CITIES_URL = (
+    "https://naturalearth.s3.amazonaws.com/50m_cultural/ne_50m_populated_places.zip"
+)
+# scalerank is Natural Earth's own 0 (most prominent) - 10 (least) importance
+# tier, already curated by them for exactly this "which features matter at
+# this zoom level" problem — reusing it beats guessing a length/population
+# cutoff by hand. Kept low (major rivers, notable cities only): at this
+# map's hex resolution (~69km/edge, 372 provinces total for the whole
+# theater) a full unfiltered layer would be visual noise, not signal.
+RIVER_MAX_SCALERANK = 5
+CITY_MAX_SCALERANK = 6
+
+
+def _load_rivers(bbox) -> gpd.GeoDataFrame:
+    shp_dir = _download_and_extract(NATURAL_EARTH_RIVERS_URL, "ne_50m_rivers_lake_centerlines")
+    rivers = gpd.read_file(shp_dir / "ne_50m_rivers_lake_centerlines.shp")
+    from shapely.geometry import box
+
+    clipped = rivers.clip(box(*bbox))
+    clipped = clipped[clipped["scalerank"] <= RIVER_MAX_SCALERANK]
+    return clipped[["name", "geometry"]].reset_index(drop=True)
+
+
+def _load_cities(bbox) -> gpd.GeoDataFrame:
+    shp_dir = _download_and_extract(NATURAL_EARTH_CITIES_URL, "ne_50m_populated_places")
+    cities = gpd.read_file(shp_dir / "ne_50m_populated_places.shp")
+    from shapely.geometry import box
+
+    clipped = cities.clip(box(*bbox))
+    clipped = clipped[clipped["SCALERANK"] <= CITY_MAX_SCALERANK]
+    return clipped[["NAME", "geometry"]].rename(columns={"NAME": "name"}).reset_index(drop=True)
 
 
 def _hex_cells(land_union, resolution: int, min_land_frac: float) -> gpd.GeoDataFrame:
@@ -211,19 +257,49 @@ def _real_water_gaps(hexes: gpd.GeoDataFrame, bbox) -> dict[str, set[str]]:
     return gaps
 
 
+# Country-based overrides applied to an otherwise plains/hills classification
+# — real macro-climate zones within this map's actual footprint, not
+# invented ones. Desert: the Saharan-fringe North African coast, where
+# anything not immediately coastal is arid. Forest: continental/alpine
+# climate countries (Gaul, the Alps, the Balkan interior), contrasted with
+# the drier Mediterranean peninsular countries (Italy, Iberia, Greece,
+# Turkey), which stay plains/hills — a real climate distinction, not an
+# arbitrary one. Deliberately excludes actual jungle/rainforest: this map's
+# bbox never reaches a tropical latitude (see the module docstring's
+# lat_max cap), so a jungle terrain type would be geographically fake for
+# this specific region — flagged and decided with the user rather than
+# added anyway.
+DESERT_COUNTRIES = {"Algeria", "Libya", "Morocco", "Tunisia", "Egypt"}
+FOREST_COUNTRIES = {
+    "France", "Bosnia and Herz.", "Croatia", "Slovenia", "Albania",
+    "Montenegro", "North Macedonia", "Serbia", "Austria", "Switzerland",
+    "Hungary", "Romania", "Bulgaria",
+}
+
+
 def _classify_terrain(hexes: gpd.GeoDataFrame, bbox) -> tuple[dict[str, str], dict[str, bool]]:
-    """Gameplay-flavor `terrain` per province, derived only from data this
-    pipeline already computes (land_frac, H3 adjacency) — no new Natural
-    Earth layers (elevation/bathymetry) are downloaded for this.
+    """Gameplay-flavor `terrain` per province. The coastal/plains/hills
+    split is derived only from data this pipeline already computes
+    (land_frac, H3 adjacency) — no new Natural Earth layers (elevation/
+    bathymetry) needed for that part. desert/forest are a country-based
+    override on top (see DESERT_COUNTRIES/FOREST_COUNTRIES above) — still
+    no new data downloaded, since `country` is already computed by
+    `_name_provinces` before this runs.
 
     `is_coastal` (also returned, for `_compute_sea_neighbors` to reuse) is
     true if a province borders real open water (`_real_water_gaps`) OR is
     mostly water itself despite being topologically land-ringed at this hex
     resolution (land_frac < 0.5) — e.g. small islands/gulfs fully encircled
-    by land hexes at ~69km resolution. Remaining provinces are `plains`
-    (land_frac >= 0.9) or `hills` (the partial-water minority in between);
-    the 0.9 cutoff was chosen empirically since non-coastal hexes in this
-    map cluster overwhelmingly at land_frac == 1.0.
+    by land hexes at ~69km resolution. A coastal province is never
+    reclassified desert/forest — the coast itself is a distinct, usually
+    more temperate strip even within a desert or forested country (this is
+    also why DESERT_COUNTRIES's coastal Mediterranean fringe stays
+    `coastal`, not `desert` — the actual desert starts further inland).
+    Remaining non-coastal provinces are `plains` (land_frac >= 0.9) or
+    `hills` (the partial-water minority in between) before the country
+    override applies; the 0.9 cutoff was chosen empirically since
+    non-coastal hexes in this map cluster overwhelmingly at
+    land_frac == 1.0.
     """
     gaps = _real_water_gaps(hexes, bbox)
     terrain: dict[str, str] = {}
@@ -231,10 +307,13 @@ def _classify_terrain(hexes: gpd.GeoDataFrame, bbox) -> tuple[dict[str, str], di
     for h3_id, land_frac in hexes["land_frac"].items():
         coastal = bool(gaps[h3_id]) or land_frac < 0.5
         is_coastal[h3_id] = coastal
+        country = hexes["country"][h3_id]
         if coastal:
             terrain[h3_id] = "coastal"
+        elif country in DESERT_COUNTRIES:
+            terrain[h3_id] = "desert"
         elif land_frac >= 0.9:
-            terrain[h3_id] = "plains"
+            terrain[h3_id] = "forest" if country in FOREST_COUNTRIES else "plains"
         else:
             terrain[h3_id] = "hills"
     return terrain, is_coastal
@@ -355,6 +434,15 @@ def generate(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     hexes.to_file(output_path, driver="GeoJSON")
     print(f"Wrote {len(hexes)} provinces to {output_path}")
+
+    rivers = _load_rivers(bbox)
+    rivers.to_file(RIVERS_OUTPUT_PATH, driver="GeoJSON")
+    print(f"Wrote {len(rivers)} rivers to {RIVERS_OUTPUT_PATH}")
+
+    cities = _load_cities(bbox)
+    cities.to_file(CITIES_OUTPUT_PATH, driver="GeoJSON")
+    print(f"Wrote {len(cities)} cities to {CITIES_OUTPUT_PATH}")
+
     return hexes
 
 

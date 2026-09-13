@@ -13,6 +13,12 @@ from functools import lru_cache
 from pathlib import Path
 
 PROVINCES_PATH = Path(__file__).parent / "provinces.geojson"
+# Purely visual overlays (backend/main.py serves these as static files, the
+# same way as PROVINCES_PATH) — no runtime game-logic reader for either one
+# exists, unlike Province below, since no game mechanic keys off a river or
+# city yet. See generate_map.py's module docstring.
+RIVERS_PATH = Path(__file__).parent / "rivers.geojson"
+CITIES_PATH = Path(__file__).parent / "cities.geojson"
 
 
 @dataclass(frozen=True)

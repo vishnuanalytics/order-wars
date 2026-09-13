@@ -1,7 +1,7 @@
 import "leaflet/dist/leaflet.css";
 import "./style.css";
 
-import { getProvinces, listScenarios } from "./api.js";
+import { getCities, getProvinces, getRivers, listScenarios } from "./api.js";
 import { MapView } from "./mapView.js";
 import { ScenarioEditor } from "./scenarioEditor.js";
 import { GameView } from "./gameView.js";
@@ -16,8 +16,10 @@ function switchTab(name) {
 
 async function main() {
   const mapView = new MapView("map");
-  const provinces = await getProvinces();
+  const [provinces, rivers, cities] = await Promise.all([getProvinces(), getRivers(), getCities()]);
   mapView.loadProvinces(provinces.features);
+  mapView.loadRivers(rivers.features);
+  mapView.loadCities(cities.features);
 
   const reviewView = new ReviewView();
   await reviewView.refreshGameList();

@@ -15,8 +15,12 @@ const TERRAIN_COLORS = {
   plains: "#c2b280",
   hills: "#8a9a5b",
   coastal: "#6fa8dc",
+  desert: "#e0c068",
+  forest: "#2d5a27",
 };
 const UNKNOWN_TERRAIN_COLOR = "#999";
+const RIVER_COLOR = "#3a7bd5";
+const CITY_MARKER_COLOR = "#4a4a4a";
 
 export class MapView {
   constructor(containerId) {
@@ -69,6 +73,39 @@ export class MapView {
       }
     ).addTo(this.map);
     this.map.fitBounds(this.geoLayer.getBounds());
+  }
+
+  /** Purely visual overlays (see map_data/generate_map.py's module
+   * docstring) — no game mechanic reads either of these, so there's no
+   * click handling or per-province bookkeeping here, unlike
+   * loadProvinces. Added after the province layer so they draw on top of
+   * it (rivers/city dots should read clearly over the hex fill/borders).
+   */
+  loadRivers(features) {
+    L.geoJSON(
+      { type: "FeatureCollection", features },
+      {
+        style: { color: RIVER_COLOR, weight: 2, opacity: 0.8 },
+        onEachFeature: (feature, layer) => {
+          if (feature.properties.name) layer.bindTooltip(feature.properties.name, { sticky: true });
+        },
+      }
+    ).addTo(this.map);
+  }
+
+  loadCities(features) {
+    for (const feature of features) {
+      const [lon, lat] = feature.geometry.coordinates;
+      L.circleMarker([lat, lon], {
+        radius: 3,
+        color: CITY_MARKER_COLOR,
+        weight: 1,
+        fillColor: "#fff",
+        fillOpacity: 0.9,
+      })
+        .bindTooltip(feature.properties.name, { permanent: false, direction: "top" })
+        .addTo(this.map);
+    }
   }
 
   _addTerrainLegend() {

@@ -799,6 +799,57 @@ The order, and why:
   this stage (mocked graph/rules tests already cover `_legal_move_targets`'
   consumers).
 
+#### Stage 1 follow-up — desert/forest terrain, rivers, cities (done, flavor-only)
+
+Requested directly by the user after playing the live site, alongside the
+territory/LLM-cost work below: "add some important cities, jungles,
+deserts, rivers." Explicitly scoped as flavor-only (no new game mechanics)
+before building, and jungle was dropped after flagging it to the user —
+this map's bbox never reaches a tropical latitude (see the module
+docstring's `lat_max` cap), so a jungle terrain type would be
+geographically fake for this specific region; substituted with forest,
+which is real here.
+
+- `_classify_terrain` gained a country-based override on top of the
+  existing coastal/plains/hills split: `DESERT_COUNTRIES` (Algeria, Libya,
+  Morocco, Tunisia, Egypt — non-coastal provinces only; the Mediterranean
+  coastal fringe of these countries stays `coastal`, since it's a
+  genuinely more temperate strip than the interior) and
+  `FOREST_COUNTRIES` (France, the Alpine/Balkan states, Hungary, Romania,
+  Bulgaria — a real continental-vs-Mediterranean climate distinction
+  against Italy/Iberia/Greece/Turkey, which stay plains/hills). No new
+  Natural Earth data needed — `country` was already computed by
+  `_name_provinces` before this runs. Confirmed unknown terrain types
+  don't need any `game/rules.py` changes: `TERRAIN_RESOURCE.get(terrain,
+  "gold")` and the defense-bonus lookup already default gracefully, so
+  desert/forest provinces just yield gold income with no special defense
+  bonus — consistent with "flavor only," not an oversight.
+- Two new committed files, kept separate from `provinces.geojson` (a
+  different geometry type — LineString/Point vs. Polygon — one flat file
+  per type beats a mixed-geometry FeatureCollection): `rivers.geojson`
+  (Natural Earth's `ne_50m_rivers_lake_centerlines`, clipped to the bbox,
+  filtered to `scalerank <= 5`) and `cities.geojson`
+  (`ne_50m_populated_places`, `scalerank <= 6`) — Natural Earth's own
+  prominence tiering reused directly rather than guessing a length/
+  population cutoff by hand, since an unfiltered layer at this map's hex
+  resolution (~69km/edge) would be visual noise. `backend/main.py` serves
+  both as static files (`GET /map/rivers`, `GET /map/cities`), mirroring
+  the existing `/map/provinces`; `frontend/src/mapView.js` draws rivers as
+  a styled polyline overlay and cities as small labeled circle markers,
+  both purely visual (no click handling, unlike the province layer).
+- Verified live end-to-end (no LLM calls needed — offline map generation,
+  then a static-file/browser check): regenerating produced 70 forest / 64
+  desert / 47 plains / 22 hills / 169 coastal (372 total, unchanged from
+  before — the algorithm changes properties, not which hexes are kept), 8
+  real named rivers (Tagus, Ebro, Danube, Loire, Rhine's delta fringe),
+  and 58 real named cities. A real screenshot confirmed the forest band
+  correctly covers Gaul/the Balkans while Italy/Iberia stay plains, desert
+  correctly covers the North African interior below the coastal fringe
+  (not the coast itself), and rivers/city markers render legibly without
+  cluttering the province coloring. `tests/test_map_data.py` gained direct
+  tests for both country-override rules and both new files' structure —
+  218/218 full suite.
+
 ### Stage 2 — multi-resource economy (done)
 
 Confirmed no DB/schema migration was needed: `FactionState.resources`/
@@ -1549,6 +1600,50 @@ sandbox, same technique Phase 5's frontend verification used) — seeded
 demo data via direct ORM writes where no LLM call was needed, real
 free-tier Groq calls (cleaned up from Neon afterward) only where the
 turn loop itself had to actually run.
+
+### Follow-up: multi-province territory, and cutting real LLM cost
+
+Direct response to feedback after actually playing the live site (not a
+new feature request in the abstract): factions rarely came into contact
+even over many turns, since each started owning exactly one province, and
+even a 20-turn game was exhausting free-tier LLM quota. The second one
+was confirmed personally, mid-build: a live `python -m agents.graph` run
+failed outright on Groq's daily token cap (199,542/200,000 used, almost
+entirely from this session's own extensive live-verification testing) —
+this pass was its own live-fire test of the problem it fixes.
+
+- The DB/API schema already carried `starting_territory: list[str]`
+  end-to-end, but every layer beneath it only read index 0 —
+  `load_faction_configs`'s own docstring said so outright. Extended
+  `_validate_faction_configs`, `load_faction_configs`,
+  `_create_game_records`, and `initial_state_for` (now seeds
+  `province_owner` for every province in a faction's territory, not just
+  its capital) to actually use the rest of the list.
+  `game/rules.py`'s `territory_of` already derives purely from
+  `province_owner`, so every downstream mechanic (income, legal move
+  targets, rebellion, siege distance) picked this up for free — territory
+  was never duplicated onto `FactionState` by original design.
+- Scenario editor: picking a capital now auto-claims a configurable-size
+  cluster of its currently-unclaimed neighbors, and a new "Adjust
+  territory" mode lets hand-adding/removing individual provinces
+  afterward. The map preview colors every faction's current starting
+  territory live, reusing `setOwnership` wholesale — the same mechanism
+  live gameplay already uses to color the board by owner.
+- `_refresh_intent` (the leader-layer call, previously firing every
+  `INTENT_REFRESH_INTERVAL` (3) turns — roughly a quarter of a game's
+  total agent LLM calls) is now a rule-based heuristic instead of an LLM
+  call. Safe to cut because `intent` is read-only flavor/context in
+  specialist prompts, never itself validated or acted on programmatically
+  the way a real action is — a role-preset-driven heuristic (reacting to
+  whether the faction is at war, and, for expansionists, how much
+  territory they already hold) serves the same purpose.
+  `_decide_action`'s one LLM call per turn is untouched — that one needs
+  an actual judgment call. 6 new direct tests cover the heuristic's
+  branches and confirm `build_llm` is never reached from this path.
+- Verified live (no LLM calls needed — scenario creation is a pure DB
+  write): territory size 4 in the scenario editor produced two real
+  4-province starting clusters, confirmed via direct API/DB query, and
+  the hand-add/remove toggle correctly round-tripped. 212/212 tests pass.
 
 ## Non-goals
 

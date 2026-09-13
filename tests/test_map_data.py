@@ -8,14 +8,22 @@ from pathlib import Path
 
 import pytest
 
-PROVINCES_PATH = Path(__file__).parent.parent / "map_data" / "provinces.geojson"
+MAP_DATA_DIR = Path(__file__).parent.parent / "map_data"
+PROVINCES_PATH = MAP_DATA_DIR / "provinces.geojson"
+RIVERS_PATH = MAP_DATA_DIR / "rivers.geojson"
+CITIES_PATH = MAP_DATA_DIR / "cities.geojson"
 
 REQUIRED_PROPERTIES = {
     "province_id", "name", "country", "neighbors", "sea_neighbors", "terrain",
     "centroid_lon", "centroid_lat", "land_frac",
 }
 
-VALID_TERRAINS = {"coastal", "hills", "plains"}
+# desert/forest (Stage 1 follow-up): country-based overrides on top of the
+# original coastal/plains/hills split — see generate_map.py's
+# DESERT_COUNTRIES/FOREST_COUNTRIES and _classify_terrain's docstring for
+# why (real macro-climate zones within this map's actual footprint, not
+# invented ones — and why jungle was deliberately left out).
+VALID_TERRAINS = {"coastal", "hills", "plains", "desert", "forest"}
 
 
 @pytest.fixture(scope="module")
@@ -23,6 +31,18 @@ def provinces() -> dict[str, dict]:
     with open(PROVINCES_PATH) as f:
         data = json.load(f)
     return {f["properties"]["province_id"]: f["properties"] for f in data["features"]}
+
+
+@pytest.fixture(scope="module")
+def rivers() -> list[dict]:
+    with open(RIVERS_PATH) as f:
+        return json.load(f)["features"]
+
+
+@pytest.fixture(scope="module")
+def cities() -> list[dict]:
+    with open(CITIES_PATH) as f:
+        return json.load(f)["features"]
 
 
 def test_provinces_file_has_features(provinces):
@@ -117,3 +137,62 @@ def test_demo_faction_homelands_present(provinces):
     assert "Italy" in countries
     assert "Tunisia" in countries
     assert "France" in countries
+
+
+def test_desert_only_applies_to_non_coastal_provinces(provinces):
+    """Desert is a country-based override, but coastal always wins first —
+    the Mediterranean coastal fringe of a Saharan country is a genuinely
+    different (more temperate) strip than its own interior; see
+    generate_map.py's _classify_terrain docstring.
+    """
+    desert_countries = {"Algeria", "Libya", "Morocco", "Tunisia", "Egypt"}
+    for props in provinces.values():
+        if props["country"] in desert_countries and props["terrain"] == "coastal":
+            continue  # the coastal fringe stays coastal, not desert — expected
+        if props["terrain"] == "desert":
+            assert props["country"] in desert_countries
+
+    assert any(p["terrain"] == "desert" for p in provinces.values()), (
+        "expected at least one desert province in this map"
+    )
+
+
+def test_forest_only_applies_to_continental_climate_countries(provinces):
+    forest_countries = {
+        "France", "Bosnia and Herz.", "Croatia", "Slovenia", "Albania",
+        "Montenegro", "North Macedonia", "Serbia", "Austria", "Switzerland",
+        "Hungary", "Romania", "Bulgaria",
+    }
+    for props in provinces.values():
+        if props["terrain"] == "forest":
+            assert props["country"] in forest_countries
+
+    assert any(p["terrain"] == "forest" for p in provinces.values()), (
+        "expected at least one forest province in this map"
+    )
+    # Italy/Iberia deliberately stay plains/hills, not forest — a real
+    # Mediterranean-vs-continental climate distinction, not an oversight.
+    assert not any(
+        p["terrain"] == "forest" and p["country"] in {"Italy", "Spain", "Portugal"}
+        for p in provinces.values()
+    )
+
+
+def test_rivers_file_has_real_named_features(rivers):
+    assert len(rivers) > 0
+    for feature in rivers:
+        assert feature["geometry"]["type"] in ("LineString", "MultiLineString")
+        assert feature["properties"].get("name")
+
+
+def test_cities_file_has_real_named_points_within_the_bbox(cities):
+    from map_data.generate_map import DEFAULT_BBOX
+
+    lon_min, lat_min, lon_max, lat_max = DEFAULT_BBOX
+    assert len(cities) > 0
+    for feature in cities:
+        assert feature["geometry"]["type"] == "Point"
+        assert feature["properties"].get("name")
+        lon, lat = feature["geometry"]["coordinates"]
+        assert lon_min <= lon <= lon_max
+        assert lat_min <= lat <= lat_max

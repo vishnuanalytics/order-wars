@@ -21,6 +21,14 @@ export function getProvinces() {
   return request("/map/provinces");
 }
 
+export function getRivers() {
+  return request("/map/rivers");
+}
+
+export function getCities() {
+  return request("/map/cities");
+}
+
 export function listScenarios() {
   return request("/scenarios");
 }
