@@ -153,6 +153,28 @@ body {
   filter: grayscale(1) brightness(1.15) contrast(0.85);
 }
 
+.terrain-legend {
+  background: rgba(255, 255, 255, 0.9);
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  text-transform: capitalize;
+}
+.terrain-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.terrain-legend-swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
 .sidebar {
   width: 380px;
   min-width: 320px;
