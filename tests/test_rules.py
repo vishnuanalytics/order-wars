@@ -655,6 +655,81 @@ def test_trade_agreement_gives_only_what_is_affordable():
     assert result["factions"]["carthage"]["resources"]["gold"] == 30  # 20 + 10 received
 
 
+def test_negotiate_tribute_one_sided_records_encoded_offer():
+    state = _state()
+    result = resolve_action(
+        state, "rome",
+        _action("negotiate", target_faction="carthage", proposal="tribute", offer_resource="gold", offer_amount=15),
+    )
+    assert result["pending_proposals"]["rome->carthage"] == "tribute:gold:15:none"
+    assert "offered carthage tribute" in result["resolution"]
+
+
+def test_negotiate_tribute_with_ceded_province_records_it():
+    state = _state()
+    result = resolve_action(
+        state, "rome",
+        _action(
+            "negotiate", target_faction="carthage", proposal="tribute",
+            offer_resource="gold", offer_amount=15, target_province=NEIGHBOR,
+        ),
+    )
+    assert result["pending_proposals"]["rome->carthage"] == f"tribute:gold:15:{NEIGHBOR}"
+
+
+def test_negotiate_tribute_acceptance_transfers_resources_and_declares_truce():
+    """Unlike trade, accepting tribute resolves the payment immediately
+    (one-time, not recurring) and requires no offer details of the
+    accepter's own -- it just cashes in the existing incoming offer."""
+    state = _state(
+        pending_proposals={"carthage->rome": "tribute:gold:15:none"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+    )
+    result = resolve_action(state, "rome", _action("negotiate", target_faction="carthage", proposal="tribute"))
+    assert result["factions"]["rome"]["resources"]["gold"] == 20 + 15
+    assert result["factions"]["carthage"]["resources"]["gold"] == 20 - 15
+    assert result["diplomatic_status"][pair_key("rome", "carthage")] == "truce"
+    assert "carthage->rome" not in result["pending_proposals"]
+    assert "rome->carthage" not in result["pending_proposals"]
+    assert "accepted carthage's tribute" in result["resolution"]
+
+
+def test_negotiate_tribute_acceptance_transfers_a_still_owned_ceded_province():
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "carthage"},
+        pending_proposals={"carthage->rome": f"tribute:gold:15:{NEIGHBOR}"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+    )
+    result = resolve_action(state, "rome", _action("negotiate", target_faction="carthage", proposal="tribute"))
+    assert result["province_owner"][NEIGHBOR] == "rome"
+
+
+def test_negotiate_tribute_acceptance_skips_a_province_no_longer_owned_by_payer():
+    """A rebellion or another war could take the promised province between
+    the offer and its acceptance -- accepting still cashes in the resource
+    payment, but can't hand over land the payer no longer holds."""
+    state = _state(
+        province_owner={HOME: "rome", NEIGHBOR: "gaul"},
+        pending_proposals={"carthage->rome": f"tribute:gold:15:{NEIGHBOR}"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+    )
+    result = resolve_action(state, "rome", _action("negotiate", target_faction="carthage", proposal="tribute"))
+    assert result["province_owner"][NEIGHBOR] == "gaul"  # unchanged
+    assert result["factions"]["rome"]["resources"]["gold"] == 20 + 15  # resource part still went through
+    assert "no longer theirs to give" in result["resolution"]
+
+
+def test_negotiate_tribute_payer_pays_only_what_affordable():
+    state = _state(
+        pending_proposals={"carthage->rome": "tribute:gold:50:none"},
+        diplomatic_status={pair_key("rome", "carthage"): "war"},
+        factions={"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage", gold=10)},
+    )
+    result = resolve_action(state, "rome", _action("negotiate", target_faction="carthage", proposal="tribute"))
+    assert result["factions"]["carthage"]["resources"]["gold"] == 0
+    assert result["factions"]["rome"]["resources"]["gold"] == 20 + 10
+
+
 def test_territory_of_reflects_province_owner():
     state = _state(province_owner={HOME: "rome", NEIGHBOR: "rome", FAR_AWAY: "carthage"})
     assert sorted(territory_of(state, "rome")) == sorted([HOME, NEIGHBOR])

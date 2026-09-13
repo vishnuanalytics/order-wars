@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 ActionType = Literal[
     "move_army", "build_unit", "develop_province", "negotiate", "declare_war", "hold"
 ]
-ProposalType = Literal["truce", "alliance", "trade"]
+ProposalType = Literal["truce", "alliance", "trade", "tribute"]
 # Rock-paper-scissors unit composition (see game/rules.py's COUNTERS):
 # cavalry > legion > siege_engine > cavalry.
 UnitType = Literal["legion", "cavalry", "siege_engine"]
@@ -47,20 +47,29 @@ class FactionAction(BaseModel):
             "target_faction; or propose/accept a recurring 'trade' (give "
             "offer_amount of offer_resource to target_faction every turn — "
             "a trade activates once you both have an outstanding trade "
-            "offer to each other, not necessarily matching amounts). "
+            "offer to each other, not necessarily matching amounts); or "
+            "offer 'tribute' to sue for peace (a one-time offer_amount of "
+            "offer_resource, optionally also ceding target_province, to end "
+            "a war — the other faction accepts by negotiating 'tribute' "
+            "back to you with no offer details of their own, cashing in "
+            "your outstanding offer and declaring a truce). "
             "declare_war: unilaterally go to war with target_faction. "
             "hold: do nothing notable this turn."
         )
     )
     target_province: str | None = Field(
         default=None,
-        description="Required for move_army/develop_province: a real province id.",
+        description=(
+            "Required for move_army/develop_province: a real province id. "
+            "Optional for negotiate with proposal='tribute': a province you "
+            "own to also cede."
+        ),
     )
     target_faction: str | None = Field(
         default=None, description="Required for negotiate/declare_war: another faction's id."
     )
     proposal: ProposalType | None = Field(
-        default=None, description="Required for negotiate: 'truce', 'alliance', or 'trade'."
+        default=None, description="Required for negotiate: 'truce', 'alliance', 'trade', or 'tribute'."
     )
     unit_type: UnitType | None = Field(
         default=None,
@@ -71,11 +80,19 @@ class FactionAction(BaseModel):
         ),
     )
     offer_resource: str | None = Field(
-        default=None, description="Required for negotiate with proposal='trade': e.g. 'gold'."
+        default=None,
+        description=(
+            "Required when proposing (not accepting) 'trade' or 'tribute': "
+            "e.g. 'gold'."
+        ),
     )
     offer_amount: int | None = Field(
         default=None,
-        description="Required for negotiate with proposal='trade': how much offer_resource to give per turn.",
+        description=(
+            "Required when proposing (not accepting) 'trade' or 'tribute': "
+            "for trade, how much offer_resource to give per turn; for "
+            "tribute, a one-time amount."
+        ),
     )
     rationale: str = Field(description="One short sentence explaining the choice.")
 
@@ -143,7 +160,12 @@ class DiplomaticAction(BaseModel):
             "target_faction; or propose/accept a recurring 'trade' (give "
             "offer_amount of offer_resource to target_faction every turn — "
             "a trade activates once you both have an outstanding trade "
-            "offer to each other, not necessarily matching amounts). "
+            "offer to each other, not necessarily matching amounts); or "
+            "offer 'tribute' to sue for peace (a one-time offer_amount of "
+            "offer_resource, optionally also ceding target_province, to end "
+            "a war — the other faction accepts by negotiating 'tribute' "
+            "back to you with no offer details of their own, cashing in "
+            "your outstanding offer and declaring a truce). "
             "declare_war: unilaterally go to war with target_faction. "
             "hold: do nothing notable this turn."
         )
@@ -152,13 +174,25 @@ class DiplomaticAction(BaseModel):
         default=None, description="Required for negotiate/declare_war: another faction's id."
     )
     proposal: ProposalType | None = Field(
-        default=None, description="Required for negotiate: 'truce', 'alliance', or 'trade'."
+        default=None, description="Required for negotiate: 'truce', 'alliance', 'trade', or 'tribute'."
+    )
+    target_province: str | None = Field(
+        default=None,
+        description="Optional for negotiate with proposal='tribute': a province you own to also cede.",
     )
     offer_resource: str | None = Field(
-        default=None, description="Required for negotiate with proposal='trade': e.g. 'gold'."
+        default=None,
+        description=(
+            "Required when proposing (not accepting) 'trade' or 'tribute': "
+            "e.g. 'gold'."
+        ),
     )
     offer_amount: int | None = Field(
         default=None,
-        description="Required for negotiate with proposal='trade': how much offer_resource to give per turn.",
+        description=(
+            "Required when proposing (not accepting) 'trade' or 'tribute': "
+            "for trade, how much offer_resource to give per turn; for "
+            "tribute, a one-time amount."
+        ),
     )
     rationale: str = Field(description="One short sentence explaining the choice.")

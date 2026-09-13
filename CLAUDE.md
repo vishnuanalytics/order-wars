@@ -1141,10 +1141,52 @@ predicted.
   short on the committed resource. 143/143 tests pass, no live LLM calls
   needed (pure rules logic; the only prompt change is explanatory text).
 
-Stages 9–11 will each get their own short validation pass against the real
-code before implementation (the same way stages 1-8 needed real data/code
-to calibrate correctly, not just up-front assumptions), landing as their
-own commits in this same order.
+### Stage 9 — tribute/vassalage (done)
+
+- No new fields on `agents/actions.py`'s schemas — tribute reuses
+  `target_province` (added for `develop_province`), `offer_resource`/
+  `offer_amount` (added for trade), and the existing `proposal`/
+  `target_faction` fields wholesale. `ProposalType` gained `"tribute"`.
+  This is the cleanest confirmation yet that the roadmap's "extends the
+  same proposal plumbing" prediction for this stage held exactly.
+- **A third distinct reciprocal-negotiation semantics**, alongside
+  truce/alliance's exact-match and trade's any-offer-both-ways: tribute is
+  a one-sided peace offer, not a mutual exchange, so the recipient accepts
+  an *existing* offer from the payer rather than making a matching one of
+  their own. `_negotiate_tribute` checks for an incoming `"tribute:"`-
+  prefixed proposal exactly like `_negotiate_trade` checks for
+  `"trade:"`, but on acceptance resolves the payment **immediately**
+  (one-time, via `factions`/`province_owner` mutation in the same call) —
+  no new persistent `*_agreements`-style state, unlike trade's standing
+  agreement.
+- A real edge case handled explicitly: the province a payer offered to
+  cede might no longer be theirs by the time the offer is accepted (lost
+  to a rebellion or another war in between) — `_negotiate_tribute`
+  re-checks `province_owner.get(ceded_province) == target` at acceptance
+  time, transfers the resource payment regardless, and notes in the
+  resolution when the land specifically couldn't be handed over. Same
+  non-breaking-on-shortfall simplification as trade for the resource part.
+- `_sanitize_action`'s tribute check had to be smarter than trade's: it
+  first checks whether an incoming tribute offer exists (accepting needs
+  no `offer_resource`/`offer_amount` of its own) before requiring those
+  fields — otherwise a legitimate acceptance would get wrongly downgraded
+  to hold.
+- `agents/graph.py`'s diplomatic prompt gained the faction's own territory
+  list (needed to cede a real, owned province) and an explanation of the
+  propose/accept-immediately mechanic; `_describe_proposal` decodes a
+  `"tribute:"`-prefixed pending proposal for display, same pattern as
+  trade's decoding.
+- `tests/test_rules.py`: one-sided offer encoding (with and without a
+  ceded province), acceptance transferring resources and declaring a
+  truce, the still-owned-vs-no-longer-owned ceded-province branch, and
+  partial payment when short on gold. 151/151 tests pass, no live LLM
+  calls needed (pure rules logic; the only prompt change is explanatory
+  text).
+
+Stages 10–11 will each get their own short validation pass against the
+real code before implementation (the same way stages 1-9 needed real
+data/code to calibrate correctly, not just up-front assumptions), landing
+as their own commits in this same order.
 
 ## Multi-level agent hierarchy (done, separate from the gameplay-depth
 ## rollout above — an agent-architecture change, not a game mechanic)

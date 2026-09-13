@@ -180,6 +180,37 @@ def test_sanitize_action_allows_a_complete_trade_proposal():
     assert sanitized.offer_amount == 5
 
 
+def test_sanitize_action_downgrades_new_tribute_proposal_missing_offer_details():
+    state = _state(
+        {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+    )
+    action = FactionAction(
+        action_type="negotiate", target_faction="carthage", proposal="tribute", rationale="testing"
+    )  # no incoming tribute offer, no offer_resource/offer_amount of its own
+
+    sanitized = _sanitize_action(state, "rome", action, move_targets=[])
+
+    assert sanitized.action_type == "hold"
+
+
+def test_sanitize_action_allows_accepting_tribute_with_no_offer_details():
+    """Accepting an existing tribute offer needs no offer_resource/
+    offer_amount of the accepter's own -- it cashes in the incoming one."""
+    state = _state(
+        {"rome": _faction("rome", "Rome"), "carthage": _faction("carthage", "Carthage")},
+        {ROME_HOME: "rome", CARTHAGE_HOME: "carthage"},
+        pending_proposals={"carthage->rome": "tribute:gold:15:none"},
+    )
+    action = FactionAction(
+        action_type="negotiate", target_faction="carthage", proposal="tribute", rationale="testing"
+    )
+
+    sanitized = _sanitize_action(state, "rome", action, move_targets=[])
+
+    assert sanitized.action_type == "negotiate"
+
+
 def test_dispatch_specialist_prioritizes_a_siege_in_progress():
     """A siege lapses if not pressed every one of the attacker's own turns
     (Stage 4) -- the dispatcher must never let the rotation override this."""

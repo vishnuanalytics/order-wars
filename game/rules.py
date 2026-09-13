@@ -57,6 +57,19 @@ actor's own per-turn upkeep) until overwritten by a fresh agreement
 between the same pair. A side that can't afford its full commitment gives
 what it can rather than breaking the agreement outright — there's no
 "trade agreement broken" consequence yet, a deliberate simplification.
+
+Tribute reuses the same `negotiate`/`offer_resource`/`offer_amount`/
+`target_province` fields as trade/develop_province, but its reciprocal
+semantics differ from *both* truce/alliance (exact-match) and trade (any
+offer both ways): tribute is a one-sided peace offer, not a mutual
+exchange, so the recipient accepts an *existing* offer rather than making
+a matching one of their own — see `_negotiate_tribute`. Accepting
+immediately transfers the offered resource (one-time, not recurring like
+trade — no new persistent state) and, if the ceded province is still
+actually owned by the payer at that moment (it might not be — a rebellion
+or another war could have taken it in the interim), transfers that too,
+then sets `diplomatic_status` to "truce". A payer short on the promised
+resource pays what it can, same non-breaking simplification as trade.
 """
 
 import hashlib
@@ -338,6 +351,62 @@ def _negotiate_trade(
     return f"proposed a trade to {target}: {action.offer_amount} {action.offer_resource}/turn"
 
 
+def _negotiate_tribute(
+    faction_id: str,
+    target: str,
+    action: FactionAction,
+    faction: FactionState,
+    factions: dict[str, FactionState],
+    province_owner: dict[str, str],
+    diplomatic_status: dict[str, str],
+    pending_proposals: dict[str, str],
+) -> str:
+    """Tribute's reciprocal semantics differ from both truce/alliance
+    (exact-match) and trade (any offer both ways) — see the module
+    docstring: it's a one-sided peace offer, so the recipient accepts an
+    *existing* offer from `target` rather than making a matching one.
+    Accepting resolves immediately (a one-time payment, not a persistent
+    agreement like trade) and sets a truce. Mutates `faction` (the
+    recipient, when accepting), `factions` (the payer's copy), `province_owner`,
+    `diplomatic_status`, and `pending_proposals` in place; returns the
+    resolution string.
+    """
+    incoming_key = f"{target}->{faction_id}"
+    outgoing_key = f"{faction_id}->{target}"
+    incoming = pending_proposals.get(incoming_key)
+
+    if incoming is not None and incoming.startswith("tribute:"):
+        _, resource, amount_str, ceded_province = incoming.split(":", 3)
+        amount = int(amount_str)
+
+        payer = dict(factions[target])
+        payer["resources"] = dict(payer["resources"])
+        transferred = min(payer["resources"].get(resource, 0), amount)
+        payer["resources"][resource] -= transferred
+        factions[target] = payer
+        faction["resources"][resource] = faction["resources"].get(resource, 0) + transferred
+
+        ceded_note = ""
+        if ceded_province != "none" and province_owner.get(ceded_province) == target:
+            province_owner[ceded_province] = faction_id
+            ceded_note = f" and {ceded_province}"
+        elif ceded_province != "none":
+            ceded_note = f" (but {ceded_province} was no longer theirs to give)"
+
+        diplomatic_status[pair_key(faction_id, target)] = "truce"
+        pending_proposals.pop(incoming_key, None)
+        pending_proposals.pop(outgoing_key, None)
+        return (
+            f"accepted {target}'s tribute of {transferred} {resource}{ceded_note} "
+            "— truce declared"
+        )
+
+    ceded = action.target_province or "none"
+    pending_proposals[outgoing_key] = f"tribute:{action.offer_resource}:{action.offer_amount}:{ceded}"
+    cede_note = f" and ceding {ceded}" if ceded != "none" else ""
+    return f"offered {target} tribute of {action.offer_amount} {action.offer_resource}{cede_note} to sue for peace"
+
+
 def _attrit(units: dict[str, int], fraction: float) -> dict[str, int]:
     """Reduce every nonzero unit type by `fraction`, rounded up.
 
@@ -440,6 +509,11 @@ def resolve_action(state: GameState, faction_id: str, action: FactionAction) -> 
         proposal = action.proposal
         if proposal == "trade":
             resolution = _negotiate_trade(faction_id, target, action, pending_proposals, trade_agreements)
+        elif proposal == "tribute":
+            resolution = _negotiate_tribute(
+                faction_id, target, action, faction, factions,
+                province_owner, diplomatic_status, pending_proposals,
+            )
         else:
             incoming_key = f"{target}->{faction_id}"
             if pending_proposals.get(incoming_key) == proposal:

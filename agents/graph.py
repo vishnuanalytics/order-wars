@@ -92,11 +92,16 @@ def _siege_summary(state: GameState, faction_id: str) -> str:
 
 def _describe_proposal(raw: str) -> str:
     """A stored proposal is usually just the ProposalType string itself,
-    but a trade offer is encoded as "trade:{resource}:{amount}" (see
-    game.rules's trade docs) — decode that into readable text."""
+    but trade/tribute offers are encoded as "trade:{resource}:{amount}" /
+    "tribute:{resource}:{amount}:{ceded_province}" (see game.rules's trade/
+    tribute docs) — decode those into readable text."""
     if raw.startswith("trade:"):
         _, resource, amount = raw.split(":", 2)
         return f"trade offering {amount} {resource}/turn"
+    if raw.startswith("tribute:"):
+        _, resource, amount, ceded = raw.split(":", 3)
+        cede_note = f" and {name_of(ceded)}" if ceded != "none" else ""
+        return f"tribute offering {amount} {resource}{cede_note} to end the war"
     return raw
 
 
@@ -254,6 +259,7 @@ def _diplomatic_prompt(state: GameState, faction_id: str) -> str:
         + "You are the diplomat/trade agent: manage external relations, "
         "executing the leader's intent tactically.\n"
         f"Your resources: {faction['resources']}.\n"
+        f"Your territory: {', '.join(territory_of(state, faction_id)) or 'none'}\n"
         f"Other factions and your relations with them: {_diplomacy_summary(state, faction_id)}\n"
         "To negotiate a recurring trade, propose (or accept an outstanding "
         "offer from) target_faction with proposal='trade', offer_resource, "
@@ -261,8 +267,16 @@ def _diplomatic_prompt(state: GameState, faction_id: str) -> str:
         "both have an outstanding trade offer to each other, even if the "
         "amounts/resources differ.\n"
         f"Your active trade agreements: {_trade_summary(state, faction_id)}\n"
+        "If losing a war, negotiate proposal='tribute' with target_faction, "
+        "offer_resource, and offer_amount (a one-time payment, optionally "
+        "also target_province from your own territory to cede) to sue for "
+        "peace. They accept by negotiating proposal='tribute' back to you "
+        "with no offer details of their own — this cashes in your offer "
+        "immediately and declares a truce.\n"
         "Choose this turn's action. For negotiate/declare_war, "
-        f"target_faction must be one of: {', '.join(other_ids) or 'none'}."
+        f"target_faction must be one of: {', '.join(other_ids) or 'none'}. "
+        "If ceding territory as part of tribute, target_province must be "
+        "one of your own territory ids above."
     )
 
 
@@ -342,6 +356,16 @@ def _sanitize_action(
             action_type="hold",
             rationale="trade proposal missing a valid offer_resource/offer_amount sanitized to hold",
         )
+    if action.action_type == "negotiate" and action.proposal == "tribute":
+        incoming = state["pending_proposals"].get(f"{action.target_faction}->{faction_id}")
+        is_accepting = isinstance(incoming, str) and incoming.startswith("tribute:")
+        if not is_accepting and (
+            not action.offer_resource or not action.offer_amount or action.offer_amount <= 0
+        ):
+            return FactionAction(
+                action_type="hold",
+                rationale="tribute proposal missing a valid offer_resource/offer_amount sanitized to hold",
+            )
     return action
 
 
