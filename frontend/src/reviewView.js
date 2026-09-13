@@ -11,6 +11,7 @@ export class ReviewView {
     this.filtersEl = document.getElementById("review-filters");
     this.factionFilter = document.getElementById("review-faction-filter");
     this.lowOnlyCheckbox = document.getElementById("review-low-only");
+    this.exportCsvButton = document.getElementById("review-export-csv");
     this.glossaryToggle = document.getElementById("metric-glossary-toggle");
     this.glossaryEl = document.getElementById("metric-glossary");
     this.progressWidgetEl = document.getElementById("annotation-progress-widget");
@@ -20,6 +21,7 @@ export class ReviewView {
 
     this.factionFilter.addEventListener("change", () => this._renderEventList());
     this.lowOnlyCheckbox.addEventListener("change", () => this._renderEventList());
+    this.exportCsvButton.addEventListener("click", () => this._exportCsv());
 
     this.glossaryEl.innerHTML = Object.entries(METRIC_GLOSSARY)
       .map(
@@ -200,12 +202,100 @@ export class ReviewView {
       <div class="review-summary-box">
         <h3>Game average, by metric</h3>
         ${metricRows}
+        ${this._renderScoreTrend(byMetric)}
         ${byFactionTable}
         <p class="summary-annotation-progress">
           ${annotatedCount} of ${events.length} decisions annotated by you.
         </p>
       </div>
     `;
+  }
+
+  /** An average is a single number; this is the shape behind it — does
+   * this metric trend up, down, or swing wildly across the game, not just
+   * where it ended up on average? One sparkline per metric, x = decision
+   * order (not turn number, since several factions can share a turn), y =
+   * score. Pure inline SVG, no charting library needed for a handful of
+   * points.
+   */
+  _renderScoreTrend(byMetric) {
+    const WIDTH = 260;
+    const HEIGHT = 36;
+    const rows = [...byMetric.entries()]
+      .map(([name, scores]) => {
+        if (scores.length < 2) return ""; // a trend needs at least two points
+        const points = scores
+          .map((score, i) => {
+            const x = (i / (scores.length - 1)) * WIDTH;
+            const y = HEIGHT - score * HEIGHT;
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+          })
+          .join(" ");
+        return `
+          <div class="score-trend-row">
+            <span class="score-trend-name">${escapeHtml(name)}</span>
+            <svg class="score-trend-sparkline" viewBox="0 0 ${WIDTH} ${HEIGHT}" preserveAspectRatio="none">
+              <polyline points="${points}" fill="none" stroke="currentColor" stroke-width="1.5" />
+            </svg>
+          </div>
+        `;
+      })
+      .join("");
+    return rows ? `<div class="score-trend"><h4>Trend across the game</h4>${rows}</div>` : "";
+  }
+
+  /** All currently-filtered decisions (respects the faction/low-score
+   * filters, matching what's visible in the list) as a downloadable CSV —
+   * for analyzing DeepEval scores and annotations outside the app.
+   */
+  _exportCsv() {
+    const factionId = this.factionFilter.value;
+    const lowOnly = this.lowOnlyCheckbox.checked;
+    const filtered = this._events.filter((event) => {
+      if (factionId && event.faction_id !== factionId) return false;
+      if (lowOnly && !event.eval_scores.some((s) => !s.success)) return false;
+      return true;
+    });
+    if (filtered.length === 0) {
+      window.alert("No decisions to export with the current filter.");
+      return;
+    }
+
+    const metricNames = [...new Set(filtered.flatMap((e) => e.eval_scores.map((s) => s.metric_name)))];
+    const header = [
+      "turn", "faction", "action_type", "resolution", "rationale",
+      ...metricNames.flatMap((m) => [`${m}_score`, `${m}_success`]),
+      "annotation_rating", "annotation_note",
+    ];
+    const csvField = (value) => {
+      const text = String(value ?? "");
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const rows = filtered.map((event) => {
+      const scoreByMetric = Object.fromEntries(event.eval_scores.map((s) => [s.metric_name, s]));
+      const annotation = event.annotations[0];
+      return [
+        event.turn,
+        this.factionNameById[event.faction_id] || event.faction_id || "",
+        event.event_type,
+        event.payload?.resolution || "",
+        event.payload?.rationale || "",
+        ...metricNames.flatMap((m) => [scoreByMetric[m]?.score ?? "", scoreByMetric[m]?.success ?? ""]),
+        annotation?.rating ?? "",
+        annotation?.note || "",
+      ]
+        .map(csvField)
+        .join(",");
+    });
+    const csv = [header.join(","), ...rows].join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `order-wars-${this.selectedGameId.slice(0, 8)}-eval.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   _renderEvent(event) {

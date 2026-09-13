@@ -397,6 +397,24 @@ def test_evaluate_game_404_for_unknown_game(client):
     assert response.status_code == 404
 
 
+def test_get_game_snapshots_returns_every_turn_not_just_the_latest(client):
+    # 2 turns so a real second-round snapshot exists per faction.
+    game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 2}).json()["game_id"]
+
+    response = client.get(f"/games/{game_id}/snapshots")
+    assert response.status_code == 200
+    snapshots = response.json()
+
+    rome_id = next(f["id"] for f in client.get(f"/games/{game_id}").json()["factions"] if f["faction_name"] == "Rome")
+    rome_turns = sorted(s["turn"] for s in snapshots if s["faction_id"] == rome_id)
+    assert rome_turns == [1, 2]
+
+
+def test_get_game_snapshots_404_for_unknown_game(client):
+    response = client.get("/games/00000000-0000-0000-0000-000000000000/snapshots")
+    assert response.status_code == 404
+
+
 def test_get_game_diplomacy_returns_only_the_latest_non_neutral_status(client, sqlite_sessionmaker):
     game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": 1}).json()["game_id"]
     game = client.get(f"/games/{game_id}").json()

@@ -312,6 +312,37 @@ def get_game_events(
     return result
 
 
+@app.get("/games/{game_id}/snapshots", response_model=list[FactionStateOut])
+def get_game_snapshots(game_id: uuid.UUID, session: Session = Depends(get_session)) -> list[FactionStateOut]:
+    """Every turn's FactionStateSnapshot for every faction, not just the
+    latest (see get_game's use of the same model) — the frontend's replay
+    scrubber needs ownership/resources *at each turn* to animate the map
+    while stepping through a finished game, not only its final state.
+    """
+    game = session.get(Game, game_id)
+    if game is None:
+        raise HTTPException(404, "Game not found")
+
+    faction_name_by_id = {faction.id: faction.faction_name for faction in game.factions}
+    snapshots = (
+        session.query(FactionStateSnapshot)
+        .filter_by(game_id=game_id)
+        .order_by(FactionStateSnapshot.turn)
+        .all()
+    )
+    return [
+        FactionStateOut(
+            faction_id=snapshot.faction_id,
+            faction_name=faction_name_by_id.get(snapshot.faction_id, ""),
+            turn=snapshot.turn,
+            resources=snapshot.resources,
+            territory=snapshot.territory,
+            unit_count=snapshot.unit_count,
+        )
+        for snapshot in snapshots
+    ]
+
+
 @app.get("/games/{game_id}/diplomacy", response_model=list[DiplomaticRelationOut])
 def get_game_diplomacy(game_id: uuid.UUID, session: Session = Depends(get_session)) -> list[DiplomaticRelationOut]:
     game = session.get(Game, game_id)

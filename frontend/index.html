@@ -64,6 +64,21 @@
             <ul id="game-list" class="item-list"></ul>
             <div id="live-ticker" class="live-ticker" hidden></div>
             <div id="game-detail"></div>
+
+            <div id="replay-controls" class="replay-controls" hidden>
+              <div class="replay-buttons">
+                <button type="button" id="replay-play-pause">▶ Play</button>
+                <select id="replay-speed">
+                  <option value="2000">0.5x</option>
+                  <option value="1000" selected>1x</option>
+                  <option value="400">2x</option>
+                  <option value="150">4x</option>
+                </select>
+                <span id="replay-position" class="replay-position"></span>
+              </div>
+              <input type="range" id="replay-scrubber" min="0" max="0" value="0" />
+            </div>
+
             <h3>Event log</h3>
             <ul id="event-log" class="event-log"></ul>
           </section>
@@ -104,6 +119,7 @@
                 <input type="checkbox" id="review-low-only" />
                 Low scores only
               </label>
+              <button type="button" id="review-export-csv" class="link-button">Export CSV</button>
             </div>
 
             <div id="review-events"></div>

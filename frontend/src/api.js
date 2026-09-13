@@ -62,6 +62,10 @@ export function getGameDiplomacy(gameId) {
   return request(`/games/${gameId}/diplomacy`);
 }
 
+export function getGameSnapshots(gameId) {
+  return request(`/games/${gameId}/snapshots`);
+}
+
 export function getRolePresetInsights() {
   return request("/insights/role-presets");
 }

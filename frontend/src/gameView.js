@@ -1,4 +1,12 @@
-import { startGame, getGame, getGameDiplomacy, getGameEvents, listGames, gameLiveSocketUrl } from "./api.js";
+import {
+  startGame,
+  getGame,
+  getGameDiplomacy,
+  getGameEvents,
+  getGameSnapshots,
+  listGames,
+  gameLiveSocketUrl,
+} from "./api.js";
 import { classifyEvent, escapeHtml } from "./utils.js";
 
 export class GameView {
@@ -17,9 +25,31 @@ export class GameView {
     this.gameDetailEl = document.getElementById("game-detail");
     this.eventLogEl = document.getElementById("event-log");
     this.tickerEl = document.getElementById("live-ticker");
+    this.replayControlsEl = document.getElementById("replay-controls");
+    this.replayPlayPauseButton = document.getElementById("replay-play-pause");
+    this.replaySpeedSelect = document.getElementById("replay-speed");
+    this.replayScrubberEl = document.getElementById("replay-scrubber");
+    this.replayPositionEl = document.getElementById("replay-position");
 
     this.socket = null;
     this.currentGameId = null;
+    // Replay-scrubbing state (loadReplay only) — the full event list plus
+    // every turn's FactionStateSnapshot (not just the latest), so stepping
+    // to any index can recolor the map as it actually looked at that point
+    // instead of only ever showing the game's final board.
+    this.replayEvents = [];
+    this.replaySnapshots = [];
+    this.replayTimer = null;
+    this.replayIndex = -1;
+    // Predict-the-winner mini-game state — purely client-side, reset per
+    // watched/replayed game; a live viewer's guess vs. the actual outcome
+    // is only meaningful for the one game currently open.
+    this.prediction = null;
+    // Cached once a finished game's notable events have been fetched for
+    // the completion banner's highlights reel, keyed by game id so
+    // refreshGameDetail's repeated calls while showing a finished game
+    // don't refetch every time.
+    this.highlightsByGameId = new Map();
     // DB faction ids (uuids) currently human-controlled, from the
     // control_state snapshot a fresh connection gets and control_changed
     // broadcasts thereafter — see watchGame. No-auth, like everything else
@@ -52,6 +82,9 @@ export class GameView {
     this.eventLogEl.innerHTML = "";
     this.tickerEl.hidden = true;
     this.controlledFactions = new Set();
+    this.prediction = null;
+    this._stopReplay();
+    this.replayControlsEl.hidden = true;
     this._closeSocket();
     await this.refreshGameDetail();
 
@@ -87,7 +120,13 @@ export class GameView {
     }
   }
 
-  /** Show a finished game's full history at once — no live connection. */
+  /** A finished game's full history, scrubbable/playable turn by turn —
+   * not just dumped into the log at once. Needs every turn's
+   * FactionStateSnapshot (see backend's GET /games/{id}/snapshots), not
+   * only the latest one refreshGameDetail's getGame call already fetches,
+   * so the map can show ownership as it actually looked at any point, not
+   * only the game's final board.
+   */
   async loadReplay(gameId) {
     this.currentGameId = gameId;
     this._closeSocket();
@@ -95,20 +134,102 @@ export class GameView {
     this.tickerEl.hidden = true;
     this.controlledFactions = new Set();
     await this.refreshGameDetail(); // populates factionNameById before the log needs it
-    const events = await getGameEvents(gameId);
-    for (const event of events) {
+
+    const [events, snapshots] = await Promise.all([getGameEvents(gameId), getGameSnapshots(gameId)]);
+    this.replayEvents = events;
+    this.replaySnapshots = snapshots;
+    this._wireReplayControls();
+
+    if (events.length === 0) {
+      this.replayControlsEl.hidden = true;
+      return;
+    }
+    this.replayControlsEl.hidden = false;
+    this.replayScrubberEl.max = String(events.length - 1);
+    this._showReplayStep(events.length - 1); // start fully revealed, matching the old dump-everything behavior
+  }
+
+  /** Ownership as of a given turn, derived from every faction's most
+   * recent snapshot at or before that turn — a snapshot doesn't exist for
+   * every single turn number for a faction (e.g. one eliminated earlier),
+   * so this can't just filter for turn === N.
+   */
+  _ownershipAsOfTurn(turn) {
+    const latestByFaction = new Map();
+    for (const snapshot of this.replaySnapshots) {
+      if (snapshot.turn > turn) continue;
+      const current = latestByFaction.get(snapshot.faction_id);
+      if (!current || snapshot.turn > current.turn) latestByFaction.set(snapshot.faction_id, snapshot);
+    }
+    const ownerByProvinceId = {};
+    for (const snapshot of latestByFaction.values()) {
+      for (const provinceId of snapshot.territory) ownerByProvinceId[provinceId] = snapshot.faction_name;
+    }
+    return ownerByProvinceId;
+  }
+
+  _showReplayStep(index) {
+    this.replayIndex = Math.max(0, Math.min(index, this.replayEvents.length - 1));
+    const event = this.replayEvents[this.replayIndex];
+
+    this.eventLogEl.innerHTML = "";
+    for (let i = 0; i <= this.replayIndex; i++) {
+      const e = this.replayEvents[i];
       this._appendLogEntry({
-        turn: event.turn,
-        faction_id: event.faction_id,
-        action_type: event.event_type,
-        resolution: event.payload?.resolution,
-        target_province: event.payload?.target_province,
-        target_faction: event.payload?.target_faction,
-        specialist: event.payload?.specialist,
-        notable: event.notable,
-        headline: event.headline,
+        turn: e.turn,
+        faction_id: e.faction_id,
+        action_type: e.event_type,
+        resolution: e.payload?.resolution,
+        target_province: e.payload?.target_province,
+        target_faction: e.payload?.target_faction,
+        specialist: e.payload?.specialist,
+        notable: e.notable,
+        headline: e.headline,
       });
     }
+    this.mapView.setOwnership(this._ownershipAsOfTurn(event.turn));
+    this.replayScrubberEl.value = String(this.replayIndex);
+    this.replayPositionEl.textContent =
+      `Turn ${event.turn} — event ${this.replayIndex + 1} of ${this.replayEvents.length}`;
+  }
+
+  _wireReplayControls() {
+    this._stopReplay();
+    this.replayPlayPauseButton.onclick = () => {
+      if (this.replayTimer) this._stopReplay();
+      else this._startReplay();
+    };
+    this.replayScrubberEl.oninput = () => {
+      this._stopReplay();
+      this._showReplayStep(Number(this.replayScrubberEl.value));
+    };
+    this.replaySpeedSelect.onchange = () => {
+      if (this.replayTimer) {
+        this._stopReplay();
+        this._startReplay();
+      }
+    };
+  }
+
+  _startReplay() {
+    if (this.replayIndex >= this.replayEvents.length - 1) this.replayIndex = -1; // restart from the beginning
+    this.replayPlayPauseButton.textContent = "⏸ Pause";
+    const speedMs = Number(this.replaySpeedSelect.value);
+    this.replayTimer = setInterval(() => {
+      if (this.replayIndex >= this.replayEvents.length - 1) {
+        this._stopReplay();
+        return;
+      }
+      this._showReplayStep(this.replayIndex + 1);
+    }, speedMs);
+  }
+
+  _stopReplay() {
+    if (this.replayTimer) {
+      clearInterval(this.replayTimer);
+      this.replayTimer = null;
+    }
+    this.replayPlayPauseButton.textContent = "▶ Play";
   }
 
   _closeSocket() {
@@ -187,6 +308,36 @@ export class GameView {
     });
   }
 
+  /** The finished game's notable moments (war declared, sieges, rebellions,
+   * agreements — see game/narrative.py), for the completion banner's
+   * highlights reel — a short recap instead of just "X wins!" with nothing
+   * about how the game actually went. Cached per game id since
+   * refreshGameDetail can be called repeatedly while showing the same
+   * finished game (e.g. from the games list) without needing a refetch.
+   */
+  async _highlightsHtml(gameId) {
+    if (!this.highlightsByGameId.has(gameId)) {
+      const events = await getGameEvents(gameId);
+      const notable = events.filter((e) => e.notable);
+      this.highlightsByGameId.set(gameId, notable);
+    }
+    const notable = this.highlightsByGameId.get(gameId);
+    if (notable.length === 0) return "";
+    return `
+      <div class="highlights-reel">
+        <h4>Highlights</h4>
+        <ul>
+          ${notable
+            .map(
+              (e) =>
+                `<li>Turn ${e.turn} — ${escapeHtml(this.factionNameById[e.faction_id] || "")}: ${escapeHtml(e.headline || e.event_type)}</li>`
+            )
+            .join("")}
+        </ul>
+      </div>
+    `;
+  }
+
   async refreshGameDetail() {
     const formSnapshot = this._snapshotActionForms();
     const [game, diplomacy] = await Promise.all([
@@ -223,14 +374,41 @@ export class GameView {
 
     const isFinished = game.status === "completed" || game.status === "failed";
     const winner = game.factions.find((f) => f.id === game.winner_faction_id);
+    // Live spectating only — control and prediction both stop meaning
+    // anything once a game is over or being replayed.
+    const canTakeControl = this.socket !== null && game.status === "running";
+
+    const predictionReveal =
+      isFinished && this.prediction
+        ? this.prediction === game.winner_faction_id
+          ? `<p class="prediction-reveal prediction-correct">🎯 You called it — you predicted ${escapeHtml(this.factionNameById[this.prediction] || "")}.</p>`
+          : `<p class="prediction-reveal prediction-wrong">You predicted ${escapeHtml(this.factionNameById[this.prediction] || "")} — not this time.</p>`
+        : "";
+    const highlightsHtml = isFinished ? await this._highlightsHtml(game.id) : "";
     const banner = isFinished
       ? `<div class="game-complete-banner">
           <strong>${game.status === "failed" ? "Game failed." : winner ? `🏆 ${escapeHtml(winner.faction_name)} wins!` : "Game complete — no winner (max turns reached)."}</strong>
+          ${predictionReveal}
+          ${highlightsHtml}
           <button type="button" class="review-this-game-button" data-game-id="${game.id}">
             See how each faction was scored →
           </button>
         </div>`
       : "";
+
+    const predictionPicker =
+      canTakeControl && !isFinished
+        ? `<div class="prediction-picker">
+            <span>Predict the winner:</span>
+            ${game.factions
+              .map(
+                (f) =>
+                  `<button type="button" class="prediction-button ${this.prediction === f.id ? "picked" : ""}"
+                     data-faction-id="${f.id}">${escapeHtml(f.faction_name)}</button>`
+              )
+              .join("")}
+          </div>`
+        : "";
 
     // War/truce/alliance status between every faction pair — only the
     // non-neutral pairs (see backend/main.py's get_game_diplomacy), so an
@@ -254,13 +432,9 @@ export class GameView {
         </div>`
       : "";
 
-    // Live-play control is only meaningful while actually spectating a
-    // running game — a finished/replayed game has no turn loop left to
-    // hand a turn to, so no button/form renders for those.
-    const canTakeControl = this.socket !== null && game.status === "running";
-
     this.gameDetailEl.innerHTML = `
       ${banner}
+      ${predictionPicker}
       <ul class="faction-summary">
         ${game.factions
           .map((faction) => {
@@ -298,7 +472,7 @@ export class GameView {
                 <span class="swatch" style="background:${swatch}"></span>
                 ${escapeHtml(faction.faction_name)} (${escapeHtml(faction.role_preset)}) — ${status}
                 ${isWinner ? " 🏆" : ""}
-                ${isControlled ? `<span class="human-controlled-badge">🎮 you</span>` : ""}
+                ${isControlled ? `<span class="human-controlled-badge">🎮 human-controlled</span>` : ""}
               </div>
               ${resources ? `<div class="faction-resources">${escapeHtml(resources)} — ${escapeHtml(units)}</div>` : ""}
               ${powerBar}
@@ -317,6 +491,12 @@ export class GameView {
     this.gameDetailEl.querySelectorAll(".control-toggle-button").forEach((button) => {
       button.addEventListener("click", () => {
         this._sendControlMessage({ type: button.dataset.action, faction_id: button.dataset.factionId });
+      });
+    });
+    this.gameDetailEl.querySelectorAll(".prediction-button").forEach((button) => {
+      button.addEventListener("click", async () => {
+        this.prediction = button.dataset.factionId;
+        await this.refreshGameDetail();
       });
     });
     this.gameDetailEl.querySelectorAll(".action-form").forEach((form) => {
