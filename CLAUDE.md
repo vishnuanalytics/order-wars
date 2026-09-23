@@ -1760,6 +1760,15 @@ ownership/attribution (whose scenario this is, who annotated what).
   (SQLite, counts SELECTs for a 1-turn vs a 4-turn game with scores and
   an annotation — must be equal and ≤ 3). Confirmed it fails on the old
   code and passes on the fix. 236/236 tests pass.
+- Follow-up in `frontend/src/gameView.js`: opening a finished game ran 4
+  sequential rounds of requests and fetched both the game and its events
+  twice. `loadReplay` now starts the events + snapshots fetches up front in
+  parallel with `refreshGameDetail`'s diplomacy call; the highlights reel
+  reuses that same events promise (`replayEventsRequest`), and the
+  games-list click passes the game it already fetched through
+  (`refreshGameDetail(prefetchedGame)`). Now 2 rounds, each endpoint once.
+  Measured in a real browser against Neon: event log filled in 7.0-7.5s →
+  2.4-4.5s. Live-game (`watchGame`) path unchanged.
 
 ## Non-goals
 

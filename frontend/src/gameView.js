@@ -50,6 +50,9 @@ export class GameView {
     // refreshGameDetail's repeated calls while showing a finished game
     // don't refetch every time.
     this.highlightsByGameId = new Map();
+    // {gameId, promise} for the events fetch loadReplay starts up front, so
+    // the highlights reel reuses it instead of fetching the same list again.
+    this.replayEventsRequest = null;
     // "Pick a province on the map" state for an action form's
     // target_province field — see _armProvincePicker. Which faction's form
     // (by id) is currently picking, and the onProvinceClick handler to
@@ -135,7 +138,18 @@ export class GameView {
    * so the map can show ownership as it actually looked at any point, not
    * only the game's final board.
    */
-  async loadReplay(gameId) {
+  async loadReplay(gameId, prefetchedGame = null) {
+    // Start the two slow fetches now, in parallel with refreshGameDetail's
+    // own requests, rather than after it — each is a round trip to Neon,
+    // and serializing them was most of a finished game's load time.
+    const eventsPromise = getGameEvents(gameId);
+    const snapshotsPromise = getGameSnapshots(gameId);
+    // Already handled via Promise.all below; this only stops an early
+    // rejection (if refreshGameDetail throws first) being reported unhandled.
+    eventsPromise.catch(() => {});
+    snapshotsPromise.catch(() => {});
+    this.replayEventsRequest = { gameId, promise: eventsPromise };
+
     this.currentGameId = gameId;
     this._closeSocket();
     this.eventLogEl.innerHTML = "";
@@ -148,9 +162,9 @@ export class GameView {
     // recently (the actual bug this replaced) or always showing nothing.
     this.prediction = this._loadPrediction(gameId);
     if (this.pickingProvinceForFaction) this._stopProvincePicking();
-    await this.refreshGameDetail(); // populates factionNameById before the log needs it
+    await this.refreshGameDetail(prefetchedGame); // populates factionNameById before the log needs it
 
-    const [events, snapshots] = await Promise.all([getGameEvents(gameId), getGameSnapshots(gameId)]);
+    const [events, snapshots] = await Promise.all([eventsPromise, snapshotsPromise]);
     this.replayEvents = events;
     this.replaySnapshots = snapshots;
     this._wireReplayControls();
@@ -332,7 +346,8 @@ export class GameView {
    */
   async _highlightsHtml(gameId) {
     if (!this.highlightsByGameId.has(gameId)) {
-      const events = await getGameEvents(gameId);
+      const pending = this.replayEventsRequest;
+      const events = await (pending && pending.gameId === gameId ? pending.promise : getGameEvents(gameId));
       const notable = events.filter((e) => e.notable);
       this.highlightsByGameId.set(gameId, notable);
     }
@@ -353,10 +368,15 @@ export class GameView {
     `;
   }
 
-  async refreshGameDetail() {
+  /** `prefetchedGame`: a getGame() result the caller already has for this
+   * same game (the games-list click fetches it to pick live vs. replay),
+   * so it isn't fetched a second time. Only used if its id matches.
+   */
+  async refreshGameDetail(prefetchedGame = null) {
     const formSnapshot = this._snapshotActionForms();
+    const reuse = prefetchedGame && prefetchedGame.id === this.currentGameId;
     const [game, diplomacy] = await Promise.all([
-      getGame(this.currentGameId),
+      reuse ? prefetchedGame : getGame(this.currentGameId),
       getGameDiplomacy(this.currentGameId),
     ]);
     this.setStatus(`${game.status} — turn ${game.current_turn}`, game.status);
@@ -739,7 +759,7 @@ export class GameView {
         if (game.status === "running") {
           await this.watchGame(gameId);
         } else {
-          await this.loadReplay(gameId);
+          await this.loadReplay(gameId, game);
         }
       });
     });
