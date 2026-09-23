@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocke
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from agents.actions import FactionAction
 from backend.auth import (
@@ -357,8 +357,13 @@ def get_game_events(
     offset: int = 0,
     session: Session = Depends(get_session),
 ) -> list[GameEventOut]:
+    # selectinload, not the default lazy load: GameEventOut serializes
+    # eval_scores + annotations, and lazy loading fetched both per event —
+    # 1 + 2N round trips to Neon (65 queries / ~18s for a 32-event game).
+    # This is a fixed 3 queries regardless of game length.
     events = (
         session.query(GameEvent)
+        .options(selectinload(GameEvent.eval_scores), selectinload(GameEvent.annotations))
         .filter_by(game_id=game_id)
         .order_by(GameEvent.turn, GameEvent.created_at)
         .offset(offset)

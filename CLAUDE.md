@@ -1743,6 +1743,24 @@ ownership/attribution (whose scenario this is, who annotated what).
   reverted the UI. Test user and scenario cleaned up from Neon afterward.
   235/235 tests pass.
 
+### Fix: slow `GET /games/{id}/events` (2026-09-23)
+
+- **Real bug, found while taking README screenshots**: a finished game's
+  Games tab showed an empty event log for ~30s. `GET /games/{id}/events`
+  took ~14-18s for a 32-event game because `GameEventOut` serializes
+  `eval_scores` + `annotations`, and both were lazy-loaded per event —
+  1 + 2N round trips to Neon (measured: 65 queries). The frontend calls it
+  twice for a finished game (highlights reel + replay), doubling the wait.
+- Fixed in `backend/main.py::get_game_events` with
+  `selectinload(GameEvent.eval_scores)` + `selectinload(GameEvent.annotations)`
+  — a fixed 3 queries regardless of game length. Measured on the same game:
+  65 → 3 queries, ~18s → ~1s in-process; ~1.5-3s over HTTP from this
+  machine to Neon (was 14.4s).
+- Regression test `test_get_game_events_query_count_does_not_grow_with_game_length`
+  (SQLite, counts SELECTs for a 1-turn vs a 4-turn game with scores and
+  an annotation — must be equal and ≤ 3). Confirmed it fails on the old
+  code and passes on the fix. 236/236 tests pass.
+
 ## Non-goals
 
 - No live Google Maps API calls in the core game loop (cost/quota, and historical

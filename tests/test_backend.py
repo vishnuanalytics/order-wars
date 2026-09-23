@@ -519,6 +519,42 @@ def test_evaluate_game_scores_events_and_persists(client):
     assert all(len(e["eval_scores"]) == 3 for e in events)
 
 
+def test_get_game_events_query_count_does_not_grow_with_game_length(client, sqlite_sessionmaker):
+    """Regression: eval_scores/annotations were lazy-loaded per event — 1 +
+    2N queries, ~18s for a 32-event game against Neon. Must stay a fixed
+    number of queries however many events (with scores + annotations) a
+    game has."""
+    from sqlalchemy import event as sa_event
+
+    engine = sqlite_sessionmaker.kw["bind"]
+    counts = {}
+    for max_turns in (1, 4):
+        game_id = client.post("/games", json={"factions": AD_HOC_FACTIONS, "max_turns": max_turns}).json()["game_id"]
+        client.post(f"/games/{game_id}/evaluate")
+        first_event_id = client.get(f"/games/{game_id}/events").json()[0]["id"]
+        client.post(f"/events/{first_event_id}/annotations", json={"rating": 4, "note": "ok"})
+
+        selects = []
+
+        def _count(conn, cursor, statement, *args):
+            if statement.lstrip().upper().startswith("SELECT"):
+                selects.append(statement)
+
+        sa_event.listen(engine, "before_cursor_execute", _count)
+        try:
+            events = client.get(f"/games/{game_id}/events").json()
+        finally:
+            sa_event.remove(engine, "before_cursor_execute", _count)
+
+        assert len(events) == max_turns * len(AD_HOC_FACTIONS)
+        assert all(len(e["eval_scores"]) == 3 for e in events)
+        assert len(events[0]["annotations"]) == 1
+        counts[max_turns] = len(selects)
+
+    assert counts[1] == counts[4], counts  # constant, not 1 + 2N
+    assert counts[4] <= 3, counts
+
+
 def test_evaluate_game_404_for_unknown_game(client):
     response = client.post("/games/00000000-0000-0000-0000-000000000000/evaluate")
     assert response.status_code == 404
