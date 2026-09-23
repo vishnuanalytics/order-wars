@@ -17,6 +17,8 @@ WebSocket backend and rendered on a Leaflet map in a small vanilla-JS
 frontend, with optional Google Sign-In for attributing scenarios and
 annotations to a real account.
 
+![Order Wars: a finished 4-faction game with highlights, diplomacy and replay](docs/screenshots/game_replay.png)
+
 ## How it works
 
 **Agents.** Each faction is not one LLM call — it's a small hierarchy.
@@ -73,6 +75,98 @@ faction's turns mid-game through a real action form, and hand it back to
 the AI at any point (an idle human auto-falls-back to the AI after 45s, so
 an abandoned tab can't stall a spectated game). Multiple browsers can watch
 and control different factions in the same game simultaneously.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph FE["Frontend · Vite + vanilla JS + Leaflet"]
+        SC["Scenario editor"]
+        GV["Games: live view,<br/>take control, replay"]
+        RV["Review + Insights"]
+    end
+
+    subgraph BE["Backend · FastAPI"]
+        REST["REST API<br/>scenarios · games · events ·<br/>snapshots · evaluate · map"]
+        WS["WebSocket<br/>/games/{id}/live"]
+        HUB["GameHub<br/>background game threads"]
+        AUTH["Google Sign-In<br/>(optional)"]
+    end
+
+    subgraph ENGINE["Game engine · Python"]
+        LOOP["game/run_game.py<br/>turn loop"]
+        AG["LangGraph agents<br/>agents/graph.py"]
+        RULES["game/rules.py<br/>pure rules engine"]
+    end
+
+    LLM["LLM fallback chain<br/>Groq → OpenRouter → Claude"]
+    EVAL["eval/ · DeepEval<br/>rule-based + GEval metrics"]
+    DB[("Neon Postgres<br/>order_wars schema")]
+    MAP[/"map_data/*.geojson<br/>~370 H3 provinces, rivers, cities"/]
+
+    SC --> REST
+    GV <--> WS
+    RV --> REST
+    REST --> HUB --> LOOP
+    WS <--> HUB
+    LOOP --> AG --> LLM
+    AG --> RULES
+    LOOP --> DB
+    REST --> DB
+    REST --> EVAL --> LLM
+    EVAL --> DB
+    MAP -.-> REST
+```
+
+**One faction's turn** (`agents/graph.py::faction_turn`):
+
+```mermaid
+flowchart TD
+    T["Faction's turn"] --> I{"Intent due<br/>for refresh?"}
+    I -->|"yes"| L["Strategic leader sets intent<br/>(rule-based heuristic, no LLM)"]
+    I -->|"no"| H
+    L --> H{"Human controlling<br/>this faction?"}
+    H -->|"yes"| HA["Human's action<br/>from the live action form"]
+    H -->|"no"| D["Dispatcher picks ONE specialist<br/>siege in progress → open proposal →<br/>role-preset rotation"]
+    D --> MIL["Military<br/>move_army / hold"]
+    D --> DIP["Diplomatic<br/>negotiate / declare_war / hold"]
+    D --> ECO["Economic<br/>build_unit / develop_province / hold"]
+    MIL & DIP & ECO --> V["One LLM call → Pydantic-validated action"]
+    HA --> S["Sanitize against legal moves"]
+    V --> S
+    S --> R["rules.resolve_action:<br/>combat, sieges, attrition, rebellion,<br/>income, trade, diplomacy"]
+    R --> N["Next faction / next turn<br/>(persisted + broadcast over WebSocket)"]
+```
+
+The game engine is deterministic and owns legality. The LLM only chooses
+*which* legal action to take, and its output is always a schema-validated
+action object, never free text that the engine has to interpret.
+
+## Screenshots
+
+<table>
+<tr>
+<td><img src="docs/screenshots/scenario_editor.png" alt="Scenario editor"/></td>
+<td><img src="docs/screenshots/welcome_tour.png" alt="Welcome tour"/></td>
+</tr>
+<tr>
+<td align="center"><em><b>Scenario editor</b>: name factions, assign a role preset, and click the map to pick each capital (auto-claims a starting territory)</em></td>
+<td align="center"><em><b>First-run tour</b> over the real terrain map (plains, hills, coastal, desert, forest, plus rivers and cities)</em></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/review.png" alt="Review tab"/></td>
+<td><img src="docs/screenshots/insights.png" alt="Insights tab"/></td>
+</tr>
+<tr>
+<td align="center"><em><b>Review</b>: DeepEval scores per decision, per-faction averages, trend sparklines, and human 1-5 ratings and notes</em></td>
+<td align="center"><em><b>Insights</b>: how each role preset scores across every evaluated game</em></td>
+</tr>
+</table>
+
+The screenshot at the top is a real 4-faction, 8-turn game: Rome
+(expansionist), Carthage (diplomat-trader), Gaul (warmonger) and Iberia
+(isolationist). Carthage allied with Rome, Gaul declared war on both Iberia
+and Carthage, and the replay slider can step through all 32 decisions.
 
 ## Directory structure
 
